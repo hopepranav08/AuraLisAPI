@@ -1,0 +1,38 @@
+# AuralisAPI — remediation-brain
+# Python 3.12  FastAPI + LangGraph agentic reasoning engine
+
+# ── Web framework ─────────────────────────────────────────────────────────────
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+
+# ── LangGraph / LangChain ─────────────────────────────────────────────────────
+langgraph==0.2.60
+langchain-core==0.3.28
+langchain-groq==0.2.4
+
+# LangGraph PostgreSQL checkpointer — separate package from langgraph core.
+# Provides AsyncPostgresSaver used in agent/graph.py.
+# Requires psycopg (psycopg3) for async support — NOT asyncpg.
+langgraph-checkpoint-postgres==2.0.2
+psycopg[binary]==3.2.3
+
+# ── Database (SQLAlchemy + asyncpg for application queries) ───────────────────
+asyncpg==0.30.0
+sqlalchemy[asyncio]==2.0.36
+
+# ── Redis ─────────────────────────────────────────────────────────────────────
+redis==5.2.0
+
+# ── Data validation ───────────────────────────────────────────────────────────
+pydantic==2.10.4
+pydantic-settings==2.7.0
+
+# ── Drift detection ───────────────────────────────────────────────────────────
+frouros==0.9.0
+scikit-learn==1.6.0
+numpy==2.1.3
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+httpx==0.28.1
+python-dotenv==1.0.1
+structlog==24.4.0

@@ -1,0 +1,253 @@
+# =============================================================================
+# AuralisAPI — Docker Compose Cluster
+# =============================================================================
+# SENSOR_MODE:
+#   live  — real eBPF kernel injection (Linux host required, kernel >= 5.8)
+#   mock  — replays events from fixtures; works on any OS including Windows
+#
+# SETUP (first time):
+#   cp .env.example .env        # then fill in your real secrets
+#   make up                     # starts all services in mock mode
+#   make up-live                # Linux only — real eBPF kernel injection
+# =============================================================================
+
+networks:
+  auralis-net:
+    driver: bridge
+    name: auralis-net
+
+volumes:
+  redis-data:
+  postgres-data:
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # 1. eBPF SENSOR  (Go 1.21+, cilium/ebpf)
+  #    Privileged container with full kernel access for eBPF program injection.
+  #    network_mode: host is mandatory so kprobes observe the host kernel
+  #    network stack, not a virtualised bridge interface.
+  #    On Windows/Docker Desktop this maps to the Hyper-V VM — mock mode works
+  #    transparently; live mode requires a native Linux host.
+  # ---------------------------------------------------------------------------
+  ebpf-sensor:
+    build:
+      context: ./ebpf-sensor
+      dockerfile: Dockerfile
+    container_name: auralis-ebpf-sensor
+    restart: unless-stopped
+
+    # --- eBPF kernel requirements ---
+    privileged: true
+    cap_add:
+      - SYS_ADMIN
+      - BPF
+      - NET_ADMIN
+      - SYS_PTRACE
+      - PERFMON
+    pid: host
+    network_mode: host          # shares host kernel network namespace
+
+    # --- kernel filesystem mounts (ignored gracefully on Docker Desktop) ---
+    volumes:
+      - /sys/kernel/debug:/sys/kernel/debug:rw
+      - /sys/fs/bpf:/sys/fs/bpf:rw
+      - /proc:/proc:ro
+
+    # --- IPC memory-lock removal: mandatory for eBPF map allocation ---
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+
+    # NOTE: network_mode: host — Docker ignores 'ports:' mappings. The metrics
+    # server (port 9090) is directly accessible on the host at 127.0.0.1:9090.
+    # Bridge-network services (intelligence-ui) reach it via host.docker.internal:9090
+    # or through the KrakenD proxy if a /drift/stats route is added to krakend.json.
+    environment:
+      SENSOR_MODE: ${SENSOR_MODE:-mock}      # "live" | "mock"
+      REDIS_ADDR: "127.0.0.1:6379"           # host network → localhost Redis
+      REDIS_STREAM: "auralis:events"
+      METRICS_PORT: "9090"                   # drift stats + health HTTP server
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+
+    depends_on:
+      redis:
+        condition: service_healthy
+
+    healthcheck:
+      test: ["CMD", "/app/ebpf-sensor", "--health-check"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # ---------------------------------------------------------------------------
+  # 2. REMEDIATION BRAIN  (Python 3.12, FastAPI, LangGraph)
+  #    Reads secrets from root .env via variable substitution.
+  #    Falls back to safe defaults so the service starts without all secrets.
+  # ---------------------------------------------------------------------------
+  remediation-brain:
+    build:
+      context: ./remediation-brain
+      dockerfile: Dockerfile
+    container_name: auralis-remediation-brain
+    restart: unless-stopped
+    networks:
+      - auralis-net
+    ports:
+      - "8000:8000"
+    environment:
+      # Infrastructure — always available within compose network
+      REDIS_URL: "redis://redis:6379"
+      REDIS_STREAM: "auralis:events"
+      DATABASE_URL: "postgresql+asyncpg://auralis:auralis@postgres:5432/auralis"
+      # LangGraph checkpointer uses plain psycopg3 connection string (no +asyncpg)
+      LANGGRAPH_DB_URL: "postgresql://auralis:auralis@postgres:5432/auralis"
+      # Secrets — read from root .env; safe defaults allow startup without them
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GITHUB_REPO: ${GITHUB_REPO:-your-org/auralisapi}
+      GITHUB_BRANCH: ${GITHUB_BRANCH:-main}
+      SECRET_KEY: ${SECRET_KEY:-changeme-replace-in-production}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ---------------------------------------------------------------------------
+  # 3. API GATEWAY  (KrakenD 2.7, stateless GitOps config)
+  # ---------------------------------------------------------------------------
+  api-gateway:
+    image: devopsfaith/krakend:2.7
+    container_name: auralis-api-gateway
+    restart: unless-stopped
+    networks:
+      - auralis-net
+    ports:
+      - "8080:8080"
+      - "8090:8090"            # KrakenD debug/metrics port
+    volumes:
+      - ./api-gateway/krakend.json:/etc/krakend/krakend.json:ro
+    environment:
+      KRAKEND_PORT: "8080"
+    depends_on:
+      remediation-brain:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/__health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ---------------------------------------------------------------------------
+  # 4. HONEYPOT DECOY  (OpenCanary)
+  # ---------------------------------------------------------------------------
+  honeypot-decoy:
+    build:
+      context: ./honeypot-decoy
+      dockerfile: Dockerfile
+    container_name: auralis-honeypot-decoy
+    restart: unless-stopped
+    networks:
+      - auralis-net
+    ports:
+      - "8081:8081"            # HTTP honeypot
+      - "2222:2222"            # SSH honeypot
+    volumes:
+      - ./honeypot-decoy/opencanary.conf:/etc/opencanary/opencanary.conf:ro
+    environment:
+      REDIS_URL: "redis://redis:6379"
+      REDIS_STREAM: "auralis:honeypot-events"
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # ---------------------------------------------------------------------------
+  # 5. INTELLIGENCE UI  (Next.js 15)
+  # ---------------------------------------------------------------------------
+  intelligence-ui:
+    build:
+      context: ./intelligence-ui
+      dockerfile: Dockerfile
+    container_name: auralis-intelligence-ui
+    restart: unless-stopped
+    networks:
+      - auralis-net
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: "http://localhost:8080"
+      NEXT_PUBLIC_WS_URL: "ws://localhost:8080"
+      NODE_ENV: ${NODE_ENV:-production}
+    depends_on:
+      - api-gateway
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+
+  # ---------------------------------------------------------------------------
+  # INFRASTRUCTURE: Redis 7
+  # Note: port exposed to host so the ebpf-sensor (network_mode: host) can
+  # reach it via 127.0.0.1:6379
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: auralis-redis
+    restart: unless-stopped
+    networks:
+      - auralis-net
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # INFRASTRUCTURE: PostgreSQL 16
+  # Used by remediation-brain (SQLAlchemy) and LangGraph checkpointer
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: auralis-postgres
+    restart: unless-stopped
+    networks:
+      - auralis-net
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: auralis
+      POSTGRES_PASSWORD: auralis
+      POSTGRES_DB: auralis
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U auralis -d auralis"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
