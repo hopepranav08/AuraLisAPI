@@ -95,7 +95,53 @@
             }
         },
         {
+            "endpoint": "/api/v1/{endpoint}/{sub}",
+            "method": "GET",
+            "output_encoding": "json",
+            "backend": [
+                {
+                    "url_pattern": "/gone",
+                    "host": ["http://remediation-brain:8000"],
+                    "encoding": "json"
+                }
+            ],
+            "extra_config": {
+                "proxy/static": {
+                    "data": {
+                        "error": "Gone",
+                        "code": 410,
+                        "message": "This API version has been decommissioned per OWASP API9:2023. Migrate to /api/v3/.",
+                        "sunset": "2025-01-01T00:00:00Z"
+                    },
+                    "strategy": "always"
+                }
+            }
+        },
+        {
             "endpoint": "/api/v1/{endpoint}",
+            "method": "POST",
+            "output_encoding": "json",
+            "backend": [
+                {
+                    "url_pattern": "/gone",
+                    "host": ["http://remediation-brain:8000"],
+                    "encoding": "json"
+                }
+            ],
+            "extra_config": {
+                "proxy/static": {
+                    "data": {
+                        "error": "Gone",
+                        "code": 410,
+                        "message": "This API version has been decommissioned per OWASP API9:2023. Migrate to /api/v3/.",
+                        "sunset": "2025-01-01T00:00:00Z"
+                    },
+                    "strategy": "always"
+                }
+            }
+        },
+        {
+            "endpoint": "/api/v1/{endpoint}/{sub}",
             "method": "POST",
             "output_encoding": "json",
             "backend": [
