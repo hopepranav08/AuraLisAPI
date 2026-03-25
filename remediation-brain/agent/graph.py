@@ -11,6 +11,7 @@
 #   - Conditional routing runs after "plan" (was after "assess_risk")
 #
 # IMPORTANT — Checkpointer lifecycle:
+
 #   AsyncPostgresSaver is an async context manager that owns a connection pool.
 #   It MUST be kept open for the entire application lifetime — do NOT create
 #   it inside a function that returns, as the pool closes on function exit.

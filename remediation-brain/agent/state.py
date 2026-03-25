@@ -67,5 +67,8 @@ class IncidentState(TypedDict):
     # None if GITHUB_TOKEN is absent (stub mode) or enforce was not reached
     github_pr_url: Optional[str]
 
-    # Final report markdown
-    report: Optional[str]
+    # Structured incident report — typed dict with keys:
+    # executive_summary, risk_level, recommended_action, technical_detail,
+    # actions_taken, reasoning_trace, incident_id, endpoint, classification,
+    # severity, pii_detected, is_pii_exposed, spec_source, pr_url
+    report: Optional[dict[str, Any]]

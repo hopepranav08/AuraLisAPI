@@ -4,38 +4,39 @@
 # Usage:
 #   make setup          Copy .env.example → .env (run once before first boot)
 #   make build          Build all Docker images
-#   make up             Start the full cluster in mock mode (default, any OS)
-#   make up-live        Start cluster with SENSOR_MODE=live (Linux host only)
+#   make up             Start the full cluster (mock mode, any OS)
+#   make start          Build images AND start cluster in one command
 #   make down           Stop all containers (preserve volumes)
 #   make clean          Stop containers and remove all volumes
 #   make logs           Tail logs for all services
-#   make logs-sensor    Tail logs for the eBPF sensor
 #   make logs-brain     Tail logs for the remediation brain
+#   make logs-sensor    Tail logs for the eBPF sensor
+#   make logs-ui        Tail logs for the intelligence UI
+#   make logs-gateway   Tail logs for the API gateway
+#   make logs-honeypot  Tail logs for the honeypot decoy
 #   make ps             Show cluster status
 #   make shell-brain    Open a shell in remediation-brain
 #   make shell-sensor   Open a shell in ebpf-sensor
 #   make shell-ui       Open a shell in intelligence-ui
 #   make lint-gateway   Validate krakend.json syntax
-#   make restart SVC=   Restart a specific service (e.g. make restart SVC=remediation-brain)
+#   make restart SVC=   Restart a specific service
+#   make up-live        Linux only — real eBPF kernel injection
 # =============================================================================
 
-.PHONY: setup build up up-live down clean logs logs-sensor logs-brain ps \
-        shell-brain shell-sensor shell-ui lint-gateway restart
+.PHONY: setup build up start up-live down clean \
+        logs logs-brain logs-sensor logs-ui logs-gateway logs-honeypot \
+        ps shell-brain shell-sensor shell-ui lint-gateway restart
 
 COMPOSE     := docker compose
 SENSOR_MODE ?= mock
 LOG_LEVEL   ?= info
 
+
 # ── First-time setup ──────────────────────────────────────────────────────────
 
 setup:
-	@if [ ! -f .env ]; then \
-		cp .env.example .env; \
-		echo "[setup] .env created from .env.example"; \
-		echo "[setup] Edit .env and add your OPENAI_API_KEY before running make up"; \
-	else \
-		echo "[setup] .env already exists — skipping copy"; \
-	fi
+	@python -c "import os, shutil; shutil.copy('.env.example', '.env') if not os.path.exists('.env') else print('[setup] .env already exists — skipping copy')"
+	@echo "[setup] .env ready. Fill in GROQ_API_KEY and GITHUB_TOKEN before running make up."
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 
@@ -44,20 +45,30 @@ build:
 
 # ── Lifecycle ─────────────────────────────────────────────────────────────────
 
+# start = build + up in one command (most common first-run workflow)
+start: build up
+
 up:
-	SENSOR_MODE=$(SENSOR_MODE) LOG_LEVEL=$(LOG_LEVEL) $(COMPOSE) up -d
+	@python -c "import os,sys; sys.exit('[error] .env not found — run: make setup') if not os.path.exists('.env') else None"
+	$(COMPOSE) up -d
 	@echo ""
-	@echo "AuralisAPI cluster is up (SENSOR_MODE=$(SENSOR_MODE))"
-	@echo "  UI:        http://localhost:3000"
-	@echo "  Gateway:   http://localhost:8080"
-	@echo "  Brain API: http://localhost:8000/docs"
-	@echo "  Honeypot:  http://localhost:8081"
+	@echo "  AuralisAPI is running (SENSOR_MODE=$(SENSOR_MODE))"
+	@echo ""
+	@echo "  Dashboard:   http://localhost:3000"
+	@echo "  Gateway:     http://localhost:8080"
+	@echo "  Brain API:   http://localhost:8000/docs"
+	@echo "  Honeypot:    http://localhost:8081"
+	@echo "  Drift stats: http://localhost:9090/drift/stats"
+	@echo ""
+	@echo "  Run 'make ps' to check container health."
+	@echo "  Run 'make logs' to tail all logs."
 	@echo ""
 
 up-live:
-	@echo "[WARNING] SENSOR_MODE=live -- eBPF programs will attempt kernel injection."
+	@python -c "import os,sys; sys.exit('[error] .env not found — run: make setup') if not os.path.exists('.env') else None"
+	@echo "[WARNING] SENSOR_MODE=live — eBPF programs will attempt kernel injection."
 	@echo "[WARNING] Requires Linux host with kernel >= 5.8 and CAP_BPF."
-	SENSOR_MODE=live LOG_LEVEL=$(LOG_LEVEL) $(COMPOSE) up -d
+	$(COMPOSE) up -d
 
 down:
 	$(COMPOSE) down
@@ -68,16 +79,27 @@ clean:
 	$(COMPOSE) down -v --remove-orphans
 	@echo "[clean] All containers and volumes removed."
 
-# ── Observability ─────────────────────────────────────────────────────────────
+# ── Logs ──────────────────────────────────────────────────────────────────────
 
 logs:
 	$(COMPOSE) logs -f
 
+logs-brain:
+	$(COMPOSE) logs -f remediation-brain
+
 logs-sensor:
 	$(COMPOSE) logs -f ebpf-sensor
 
-logs-brain:
-	$(COMPOSE) logs -f remediation-brain
+logs-ui:
+	$(COMPOSE) logs -f intelligence-ui
+
+logs-gateway:
+	$(COMPOSE) logs -f api-gateway
+
+logs-honeypot:
+	$(COMPOSE) logs -f honeypot-decoy
+
+# ── Status ────────────────────────────────────────────────────────────────────
 
 ps:
 	$(COMPOSE) ps
@@ -98,6 +120,7 @@ shell-ui:
 restart:
 	@if [ -z "$(SVC)" ]; then \
 		echo "Usage: make restart SVC=<service-name>"; \
+		echo "       e.g.  make restart SVC=remediation-brain"; \
 		exit 1; \
 	fi
 	$(COMPOSE) restart $(SVC)

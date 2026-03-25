@@ -7,7 +7,7 @@ uvicorn[standard]==0.32.1
 
 # ── LangGraph / LangChain ─────────────────────────────────────────────────────
 langgraph==0.2.60
-langchain-core==0.3.28
+langchain-core==0.3.35
 langchain-groq==0.2.4
 
 # LangGraph PostgreSQL checkpointer — separate package from langgraph core.
@@ -36,3 +36,10 @@ numpy==2.1.3
 httpx==0.28.1
 python-dotenv==1.0.1
 structlog==24.4.0
+
+# ── Phase 3 — GitHub GitOps integration + fake data ──────────────────────────
+PyGithub==2.5.0       # GitHub API: spec fetch + PR creation in EnforcerNode
+faker==33.1.0         # realistic fake data (Phase 2 honeypot generator, staged here)
+
+# ── OpenAPI spec parsing (explicit — also transitive via langchain-core) ──────
+PyYAML>=6.0           # yaml.safe_load in nodes.py _fetch_openapi_spec

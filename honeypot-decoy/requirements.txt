@@ -1,11 +1,21 @@
 
-# honeypot-decoy — OpenCanary + Redis event forwarding
+# honeypot-decoy — OpenCanary + Dynamic Honeypot Server
 
-# OpenCanary honeypot daemon
+# ── OpenCanary honeypot daemon ─────────────────────────────────────────────────
 opencanary==0.9.3
 
-# Redis client for forwarding honeypot events to auralis:honeypot-events stream
+# ── Redis client for forwarding honeypot events to auralis:honeypot-events ────
 redis==5.2.0
 
-# HTTP requests used by optional alerting integrations
+# ── HTTP requests (used by opencanary alerting integrations) ──────────────────
+# opencanary 0.9.3 requires requests<2.32
 requests==2.31.0
+
+# ── Phase 4: Dynamic honeypot FastAPI server (honeypot_server.py, port 8082) ──
+fastapi==0.115.6
+uvicorn==0.32.1           # plain uvicorn (no [standard] — avoids uvloop/httptools compilation)
+pydantic==2.10.4
+faker==33.1.0             # realistic fake response generation
+httpx==0.28.1             # async webhook POST to brain (fire-and-forget)
+structlog==24.4.0         # structured logging (matches brain logging format)
+anyio==4.7.0              # required by starlette/fastapi async runtime

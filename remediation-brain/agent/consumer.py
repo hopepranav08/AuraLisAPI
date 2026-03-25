@@ -4,6 +4,7 @@
 # the LangGraph incident response workflow.
 #
 # Event routing:
+
 #   event_type == "drift_alert"  → high-priority incident (resurrection / ph_threshold)
 #   all other events             → standard HTTP event incident workflow
 #

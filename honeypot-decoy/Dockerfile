@@ -23,7 +23,13 @@ RUN pip install --no-cache-dir --upgrade pip && \
 COPY start.sh /start.sh
 RUN chmod +x /start.sh
 
-# 8081 = HTTP honeypot, 2222 = SSH honeypot
-EXPOSE 8081 2222
+# Phase 4: dynamic honeypot server and config generator
+COPY honeypot_server.py /app/honeypot_server.py
+COPY config_generator.py /app/config_generator.py
+
+# 8081 = OpenCanary HTTP honeypot
+# 2222 = OpenCanary SSH honeypot
+# 8082 = Dynamic honeypot FastAPI server (Phase 4)
+EXPOSE 8081 2222 8082
 
 ENTRYPOINT ["/start.sh"]

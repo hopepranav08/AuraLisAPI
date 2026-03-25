@@ -49,10 +49,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-# Copy all Python source (agent/, api/, main.py)
+# Copy all Python source (agent/, api/, enforcement/, main.py)
 # Note: .env files are NOT copied — secrets injected via docker-compose environment
 COPY agent/ ./agent/
 COPY api/ ./api/
+COPY enforcement/ ./enforcement/
 COPY main.py .
 
 EXPOSE 8000

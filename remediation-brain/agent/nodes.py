@@ -31,8 +31,26 @@ from typing import Any, Literal, Optional
 
 import httpx
 import structlog
+from pydantic import BaseModel, Field
 
 from agent.state import IncidentState
+
+
+# ── Structured report schema (used by Groq .with_structured_output) ───────────
+
+class IncidentReport(BaseModel):
+    executive_summary: str = Field(
+        description="3-4 sentence summary suitable for a non-technical stakeholder"
+    )
+    risk_level: Literal["critical", "high", "medium", "low"] = Field(
+        description="Overall risk assessment — must match the incident severity"
+    )
+    recommended_action: str = Field(
+        description="The single most important next step for the security team"
+    )
+    technical_detail: str = Field(
+        description="Technical explanation of what was detected and why it matters"
+    )
 
 # Phase 4: KrakenD mutator — imported with graceful fallback so the module
 # still loads even if the enforcement package is temporarily unavailable.
@@ -46,6 +64,7 @@ log = structlog.get_logger(__name__)
 
 # ── Groq LLM (optional — falls back to heuristics if key not set) ─────────────
 _llm = None
+_llm_structured = None   # ChatGroq bound to IncidentReport schema
 _groq_key = os.getenv("GROQ_API_KEY", "")
 if _groq_key:
     try:
@@ -55,8 +74,10 @@ if _groq_key:
             groq_api_key=_groq_key,
             temperature=0,
         )
+        _llm_structured = _llm.with_structured_output(IncidentReport)
     except Exception:
         _llm = None
+        _llm_structured = None
 
 # ── GitHub client (optional — graceful degradation when token absent) ──────────
 _github = None
@@ -578,10 +599,11 @@ async def enforce_node(state: IncidentState) -> dict[str, Any]:
     except Exception as exc:
         executed.append(f"[enforce:WARN] honeypot registration failed: {exc}")
 
+    action_msg = f"[enforce] completed: {len(executed)} action(s) taken for {state['raw_event'].get('path', 'unknown')}"
     return {
         "executed_actions": executed,
         "github_pr_url":   pr_url,
-        "reasoning_trace": executed,
+        "reasoning_trace": [action_msg],
     }
 
 
@@ -623,17 +645,21 @@ def _build_pr_body(state: IncidentState) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def report_node(state: IncidentState) -> dict[str, Any]:
-    """Compile a comprehensive incident report from accumulated state.
+    """Compile a structured incident report from accumulated state.
 
-    Phase 3 enhancements:
-    - Includes spec_diff summary (github vs heuristics, what was found).
-    - Includes github_pr_url if enforcement ran.
-    - If Groq is configured, generates a natural-language executive summary.
+    Returns report as a typed dict with fields consumable by the UI:
+      executive_summary, risk_level, recommended_action, technical_detail,
+      actions_taken, reasoning_trace, plus incident metadata.
+
+    When Groq is configured the four AI fields are generated via
+    .with_structured_output(IncidentReport) — no string parsing required.
+    Falls back to heuristic values when GROQ_API_KEY is absent.
     """
     incident_id    = state.get("incident_id", "N/A")
     classification = state.get("classification")
     severity       = state.get("severity")
-    pii            = ", ".join(state.get("pii_findings", [])) or "None"
+    pii_list       = state.get("pii_findings", [])
+    pii            = ", ".join(pii_list) or "None"
     is_pii         = state.get("is_pii_exposed", False)
     actions        = state.get("executed_actions", [])
     trace          = state.get("reasoning_trace", [])
@@ -643,42 +669,71 @@ async def report_node(state: IncidentState) -> dict[str, Any]:
 
     spec_source = "GitHub" if spec_diff.get("used_github_spec") else "path-prefix heuristics"
 
-    structured = "\n".join([
-        f"# Incident Report — {incident_id}",
-        f"**Endpoint:** `{path}`",
-        f"**Classification:** {classification}",
-        f"**Severity:** {severity}",
-        f"**PII Detected:** {pii} {'⚠️ CISO escalation queued' if is_pii else ''}",
-        f"**Spec Source:** {spec_source}",
-        f"**PR URL:** {pr_url or 'N/A (no enforcement or GITHUB_TOKEN not set)'}",
-        "",
-        "## Actions Taken",
-        *[f"- {a}" for a in actions],
-        "",
-        "## Reasoning Trace",
-        *[f"- {r}" for r in trace],
-    ])
+    # Metadata always included regardless of LLM availability
+    meta: dict[str, Any] = {
+        "incident_id":    incident_id,
+        "endpoint":       path,
+        "classification": classification,
+        "severity":       severity,
+        "pii_detected":   pii,
+        "is_pii_exposed": is_pii,
+        "spec_source":    spec_source,
+        "pr_url":         pr_url,
+        "actions_taken":  actions,
+        "reasoning_trace": trace,
+    }
 
-    if _llm is None:
-        return {"report": structured}
+    if _llm_structured is None:
+        # Heuristic fallback — build plain-text fields from state
+        pii_note = f" PII exposure detected: {pii}. CISO escalation recommended." if is_pii else ""
+        action_summary = "; ".join(actions) if actions else "no enforcement actions taken"
+        meta.update({
+            "executive_summary": (
+                f"Endpoint {path} was classified as {classification} with {severity} severity.{pii_note} "
+                f"Automated analysis used {spec_source}. {action_summary.capitalize()}."
+            ),
+            "risk_level":         severity or "unknown",
+            "recommended_action": (
+                "Review the planned actions and enforce quarantine via the Approve button."
+                if not actions else
+                "Verify the quarantine is active in the gateway config and monitor for traffic resumption."
+            ),
+            "technical_detail": (
+                f"The endpoint {path} was detected via eBPF traffic analysis. "
+                f"Classification: {classification}. Spec diff source: {spec_source}. "
+                f"Executed: {action_summary}."
+            ),
+        })
+        return {"report": meta}
 
     prompt = (
-        f"You are a security analyst writing a concise incident report.\n"
+        f"You are a security analyst writing a concise API security incident report.\n"
         f"Endpoint: {path}\n"
-        f"Classification: {classification}\n"
+        f"Classification: {classification} (zombie = deprecated API still receiving traffic)\n"
         f"Severity: {severity}\n"
-        f"PII detected: {pii}\n"
+        f"PII detected in response: {pii}\n"
         f"Spec analysis source: {spec_source}\n"
         f"Actions taken: {'; '.join(actions) or 'none'}\n"
-        f"PR created: {pr_url or 'No'}\n\n"
-        f"Write a 3-4 sentence executive summary suitable for a non-technical stakeholder. "
-        f"Be direct and factual. Mention the PII risk if applicable."
+        f"GitHub PR: {pr_url or 'not created'}\n\n"
+        f"Fill in all four fields of the report schema. "
+        f"Be direct and factual. Mention PII risk explicitly if applicable. "
+        f"The recommended_action must be a single concrete step."
     )
     try:
-        response    = await _llm.ainvoke(prompt)
-        llm_summary = response.content
-    except Exception:
-        llm_summary = "LLM summary unavailable."
+        llm_report: IncidentReport = await _llm_structured.ainvoke(prompt)
+        meta.update({
+            "executive_summary":  llm_report.executive_summary,
+            "risk_level":         llm_report.risk_level,
+            "recommended_action": llm_report.recommended_action,
+            "technical_detail":   llm_report.technical_detail,
+        })
+    except Exception as exc:
+        log.warning("structured LLM report failed, using heuristics", error=str(exc))
+        meta.update({
+            "executive_summary":  "AI analysis unavailable — see technical detail.",
+            "risk_level":         severity or "unknown",
+            "recommended_action": "Manually review the actions taken and confirm quarantine status.",
+            "technical_detail":   f"Endpoint {path} | {classification} | {severity} | actions: {'; '.join(actions) or 'none'}",
+        })
 
-    full_report = f"{structured}\n\n## Executive Summary (AI-Generated)\n{llm_summary}"
-    return {"report": full_report}
+    return {"report": meta}

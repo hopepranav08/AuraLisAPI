@@ -1,4 +1,4 @@
-# api/routes.py — FastAPI Route Definitions (Phase 3 + Phase 4)
+# api/routes.py — FastAPI Route Definitions (Phase 3 + Phase 4 + Phase 5)
 #
 # Phase 3 endpoints:
 #   GET  /incidents                    — list all incidents from LangGraph checkpoint store
@@ -12,6 +12,9 @@
 #   GET  /gateway/config               — live krakend.json state (quarantined vs active)
 #   POST /gateway/quarantine           — trigger local mutation + honeypot registration
 #   POST /webhooks/honeypot-alert      — receive deception hit events, publish to Redis
+#
+# Phase 5 endpoints:
+#   GET  /honeypot/events              — read recent honeypot hits from Redis stream
 from __future__ import annotations
 
 import json
@@ -19,12 +22,19 @@ import os
 import uuid
 from typing import Any, Optional
 
+import httpx
 import redis.asyncio as aioredis
 import structlog
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from enforcement.krakend_mutator import mutate_krakend, read_gateway_state
+try:
+    from enforcement.krakend_mutator import mutate_krakend, read_gateway_state
+    _MUTATOR_AVAILABLE = True
+except ImportError:
+    mutate_krakend = None  # type: ignore[assignment]
+    read_gateway_state = None  # type: ignore[assignment]
+    _MUTATOR_AVAILABLE = False
 
 log = structlog.get_logger(__name__)
 router = APIRouter()
@@ -68,6 +78,15 @@ async def list_incidents(request: Request, limit: int = 50):
             next_nodes = list(state_snapshot.next or [])
             is_waiting = "enforce" in next_nodes  # interrupted before enforce
 
+            raw_report = values.get("report")
+            report_summary: dict[str, Any] | None = None
+            if isinstance(raw_report, dict):
+                report_summary = {
+                    "executive_summary":  raw_report.get("executive_summary"),
+                    "risk_level":         raw_report.get("risk_level"),
+                    "recommended_action": raw_report.get("recommended_action"),
+                }
+
             incidents.append({
                 "thread_id":      thread_id,
                 "endpoint":       (values.get("raw_event") or {}).get("path", "unknown"),
@@ -77,6 +96,7 @@ async def list_incidents(request: Request, limit: int = 50):
                 "status":         "awaiting_approval" if is_waiting else "completed",
                 "next":           next_nodes,
                 "github_pr_url":  values.get("github_pr_url"),
+                "report_summary": report_summary,
             })
     except Exception as exc:
         log.warning("incident listing failed", error=str(exc))
@@ -191,7 +211,7 @@ async def approve_incident(thread_id: str, request: Request, body: ApprovalReque
         "status":        "enforced",
         "thread_id":     thread_id,
         "github_pr_url": pr_url,
-        "report_preview": (report or "")[:500] + ("…" if report and len(report) > 500 else ""),
+        "report_preview": (report or {}).get("executive_summary", "")[:300] if isinstance(report, dict) else "",
     }
 
 
@@ -247,7 +267,7 @@ async def reject_incident(thread_id: str, request: Request, body: ApprovalReques
         "status":        "rejected",
         "thread_id":     thread_id,
         "rejection_note": rejection_note,
-        "report_preview": ((snapshot.values or {}).get("report") or "")[:300],
+        "report_preview": ((snapshot.values or {}).get("report") or {}).get("executive_summary", "")[:300],
     }
 
 
@@ -265,7 +285,6 @@ async def trigger_remediation(req: RemediateRequest, request: Request):
     Manually trigger the LangGraph remediation workflow for a given API path.
     Returns a thread_id for async polling via GET /incidents/{thread_id}.
     """
-    import uuid
     graph = getattr(request.app.state, "graph", None)
     if graph is None:
         raise HTTPException(status_code=503, detail="Graph not initialized")
@@ -357,6 +376,8 @@ async def get_gateway_config():
     This reflects any mutations made by enforce_node without waiting for a
     PR to be reviewed and merged.
     """
+    if not _MUTATOR_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Enforcement module unavailable")
     state = read_gateway_state()
     return {
         "config_path":         os.getenv("KRAKEND_CONFIG_PATH", "/app/krakend.json"),
@@ -389,6 +410,9 @@ async def trigger_quarantine(body: QuarantineRequest):
     directly from the dashboard or CI pipelines for manual quarantine actions.
     Idempotent — calling twice for the same path is safe.
     """
+    if not _MUTATOR_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Enforcement module unavailable")
+
     incident_id = body.incident_id or str(uuid.uuid4())
 
     # 1. Mutate local krakend.json
@@ -397,7 +421,6 @@ async def trigger_quarantine(body: QuarantineRequest):
     # 2. Register with honeypot server (best-effort)
     honeypot_status = "skipped"
     try:
-        import httpx
         async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
             resp = await client.post(
                 "http://honeypot-decoy:8082/admin/register-path",
@@ -474,13 +497,43 @@ async def receive_honeypot_alert(payload: HoneypotAlertPayload):
 
     try:
         client = aioredis.from_url(redis_url, decode_responses=True)
-        await client.xadd(stream, {"data": json.dumps(event_data)})
+        await client.xadd(stream, {"data": json.dumps(event_data)}, maxlen=1000, approximate=True)
         await client.aclose()
     except Exception as exc:
         log.warning("failed to publish honeypot event to Redis", error=str(exc))
         # Return 200 anyway — the honeypot server must not retry on Redis failures.
 
     return {"status": "received", "path": payload.path}
+
+
+# ── Phase 5: Honeypot events feed ─────────────────────────────────────────────
+
+@router.get("/honeypot/events", tags=["Honeypot"])
+async def get_honeypot_events(limit: int = 50):
+    """
+    Return the most recent honeypot hit events from the auralis:honeypot-events Redis stream.
+    Used by the intelligence dashboard threat intel feed.
+
+    Events are returned newest-first (xrevrange). Each entry is the JSON payload
+    published by receive_honeypot_alert. The stream uses MAXLEN ~= 1000 so it
+    never grows unboundedly — this endpoint is safe to poll every 5 seconds.
+    """
+    redis_url = os.getenv("REDIS_URL", "redis://redis:6379")
+    try:
+        client = aioredis.from_url(redis_url, decode_responses=True)
+        raw_entries = await client.xrevrange("auralis:honeypot-events", count=limit)
+        await client.aclose()
+        events = []
+        for _entry_id, fields in raw_entries:
+            if "data" in fields:
+                try:
+                    events.append(json.loads(fields["data"]))
+                except json.JSONDecodeError:
+                    pass
+        return {"events": events, "total": len(events)}
+    except Exception as exc:
+        log.warning("honeypot events fetch failed", error=str(exc))
+        return {"events": [], "total": 0, "error": str(exc)}
 
 
 # ── Internal helpers ───────────────────────────────────────────────────────────

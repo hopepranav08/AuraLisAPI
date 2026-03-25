@@ -97,7 +97,15 @@ services:
       - auralis-net
     ports:
       - "8000:8000"
+    volumes:
+      # Phase 4: mount krakend.json (read-write) so enforce_node can mutate it
+      # instantly for same-process quarantine before the GitHub PR is merged.
+      # The api-gateway mounts the same host file as :ro — Docker allows different
+      # containers to mount the same file with different access modes.
+      - ./api-gateway/krakend.json:/app/krakend.json
     environment:
+      # Phase 4: path to the locally-mounted krakend.json for direct mutation
+      KRAKEND_CONFIG_PATH: "/app/krakend.json"
       # Infrastructure — always available within compose network
       REDIS_URL: "redis://redis:6379"
       REDIS_STREAM: "auralis:events"
@@ -105,8 +113,8 @@ services:
       # LangGraph checkpointer uses plain psycopg3 connection string (no +asyncpg)
       LANGGRAPH_DB_URL: "postgresql://auralis:auralis@postgres:5432/auralis"
       # Secrets — read from root .env; safe defaults allow startup without them
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_MODEL: ${GROQ_MODEL:-llama-3.3-70b-versatile}
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       GITHUB_REPO: ${GITHUB_REPO:-your-org/auralisapi}
       GITHUB_BRANCH: ${GITHUB_BRANCH:-main}
@@ -163,8 +171,9 @@ services:
     networks:
       - auralis-net
     ports:
-      - "8081:8081"            # HTTP honeypot
-      - "2222:2222"            # SSH honeypot
+      - "8081:8081"            # HTTP honeypot (OpenCanary)
+      - "2222:2222"            # SSH honeypot (OpenCanary)
+      - "8082:8082"            # Dynamic deception server (Phase 4)
     volumes:
       - ./honeypot-decoy/opencanary.conf:/etc/opencanary/opencanary.conf:ro
     environment:
@@ -193,14 +202,18 @@ services:
       - auralis-net
     ports:
       - "3000:3000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
-      NEXT_PUBLIC_API_URL: "http://localhost:8080"
+      NEXT_PUBLIC_API_URL: "http://api-gateway:8080"
       NEXT_PUBLIC_WS_URL: "ws://localhost:8080"
+      BRAIN_INTERNAL_URL: "http://remediation-brain:8000"
+      SENSOR_METRICS_URL: "http://host.docker.internal:9090"
       NODE_ENV: ${NODE_ENV:-production}
     depends_on:
       - api-gateway
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3000"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000 > /dev/null 2>&1 || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
