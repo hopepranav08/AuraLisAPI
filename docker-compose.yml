@@ -116,7 +116,7 @@ services:
       GROQ_API_KEY: ${GROQ_API_KEY:-}
       GROQ_MODEL: ${GROQ_MODEL:-llama-3.3-70b-versatile}
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
-      GITHUB_REPO: ${GITHUB_REPO:-your-org/auralisapi}
+      GITHUB_REPO: ${GITHUB_REPO:-hopepranav08/AuraLisAPI}
       GITHUB_BRANCH: ${GITHUB_BRANCH:-main}
       SECRET_KEY: ${SECRET_KEY:-changeme-replace-in-production}
       LOG_LEVEL: ${LOG_LEVEL:-info}

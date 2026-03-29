@@ -1,0 +1,278 @@
+openapi: "3.0.3"
+info:
+  title: AuralisAPI Target Service
+  description: >
+    Sample API specification for the AuralisAPI demo environment.
+    v1 endpoints are deprecated and represent Zombie APIs under active monitoring.
+    v3 endpoints are the current production surface.
+  version: "3.0.0"
+  contact:
+    name: AuralisAPI Security Team
+
+servers:
+  - url: http://localhost:8080
+    description: Local API gateway (KrakenD)
+
+paths:
+
+  # ── v1 endpoints (DEPRECATED — Zombie API candidates) ─────────────────────
+
+  /api/v1/users:
+    get:
+      summary: List users (deprecated)
+      deprecated: true
+      description: >
+        DEPRECATED: Use /api/v3/users. This endpoint lacks OAuth2 enforcement
+        and returns full PII including email and phone without field-level redaction.
+      tags: [deprecated]
+      responses:
+        "200":
+          description: User list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/UserV1"
+    post:
+      summary: Create user (deprecated)
+      deprecated: true
+      tags: [deprecated]
+      responses:
+        "201":
+          description: Created
+
+  /api/v1/payments:
+    get:
+      summary: List payments (deprecated)
+      deprecated: true
+      description: >
+        DEPRECATED: Use /api/v3/payments. Missing rate limiting and PCI-DSS
+        controls. Returns raw card metadata.
+      tags: [deprecated]
+      responses:
+        "200":
+          description: Payment list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/PaymentV1"
+    post:
+      summary: Create payment (deprecated)
+      deprecated: true
+      tags: [deprecated]
+      responses:
+        "201":
+          description: Created
+
+  /api/v1/auth/login:
+    post:
+      summary: Login (deprecated)
+      deprecated: true
+      description: >
+        DEPRECATED: Use /api/v3/auth/token. This endpoint uses HTTP Basic Auth
+        and returns long-lived tokens with no expiry.
+      tags: [deprecated]
+      responses:
+        "200":
+          description: Token response
+
+  /api/v1/admin/users:
+    get:
+      summary: Admin user management (deprecated)
+      deprecated: true
+      description: >
+        DEPRECATED: Exposed admin endpoint with broken function-level authorization.
+        OWASP API5:2023 — BFLA risk.
+      tags: [deprecated]
+      responses:
+        "200":
+          description: Admin user list
+
+  /api/v1/webhook:
+    post:
+      summary: Webhook receiver (deprecated)
+      deprecated: true
+      description: >
+        DEPRECATED: Unauthenticated webhook endpoint still processing events.
+        No HMAC signature validation.
+      tags: [deprecated]
+      responses:
+        "200":
+          description: Accepted
+
+  /api/v1/legacy-payments:
+    get:
+      summary: Legacy payment processor (deprecated)
+      deprecated: true
+      description: >
+        DEPRECATED: Pre-PCI-DSS v4 payment endpoint. Never decommissioned after
+        migration to Stripe. Connected to live payment processor.
+        HIGH RISK — Zombie API resurrection detection active.
+      tags: [deprecated]
+      responses:
+        "200":
+          description: Legacy payment data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyPayment"
+
+  /api/v1/internal/config:
+    get:
+      summary: Internal config endpoint (deprecated)
+      deprecated: true
+      description: >
+        DEPRECATED: Exposes service configuration including connection strings.
+        Should have been removed in Q2 2023.
+      tags: [deprecated]
+      responses:
+        "200":
+          description: Config dump
+
+  # ── v2 endpoints (DEPRECATED — phased out in favour of v3) ────────────────
+
+  /api/v2/users:
+    get:
+      summary: List users v2 (deprecated)
+      deprecated: true
+      description: Superseded by v3. Missing field-level encryption for PII.
+      tags: [deprecated]
+      responses:
+        "200":
+          description: User list
+
+  /api/v2/payments:
+    get:
+      summary: List payments v2 (deprecated)
+      deprecated: true
+      tags: [deprecated]
+      responses:
+        "200":
+          description: Payment list
+    post:
+      summary: Create payment v2 (deprecated)
+      deprecated: true
+      tags: [deprecated]
+      responses:
+        "201":
+          description: Created
+
+  # ── v3 endpoints (CURRENT production surface) ─────────────────────────────
+
+  /api/v3/users:
+    get:
+      summary: List users
+      description: Current user API with OAuth2 + field redaction.
+      tags: [users]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Paginated user list
+    post:
+      summary: Create user
+      tags: [users]
+      security:
+        - bearerAuth: []
+      responses:
+        "201":
+          description: Created
+
+  /api/v3/payments:
+    get:
+      summary: List payments
+      description: PCI-DSS v4 compliant payment API.
+      tags: [payments]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Payment list
+    post:
+      summary: Create payment
+      tags: [payments]
+      security:
+        - bearerAuth: []
+      responses:
+        "201":
+          description: Created
+
+  /api/v3/auth/token:
+    post:
+      summary: Issue auth token
+      description: OAuth2 short-lived JWT with refresh token rotation.
+      tags: [auth]
+      responses:
+        "200":
+          description: JWT token pair
+
+  # ── Internal AuralisAPI management endpoints ──────────────────────────────
+
+  /api/inventory:
+    get:
+      summary: API inventory
+      description: AuralisAPI endpoint inventory — list of all discovered endpoints.
+      tags: [auralis]
+      responses:
+        "200":
+          description: Inventory list
+
+  /api/incidents:
+    get:
+      summary: Active incidents
+      description: List of all active Zombie API incidents.
+      tags: [auralis]
+      responses:
+        "200":
+          description: Incident list
+
+  /api/remediate:
+    post:
+      summary: Manual remediation trigger
+      description: Manually trigger remediation for a specific path.
+      tags: [auralis]
+      responses:
+        "200":
+          description: Remediation started
+
+# ── Schemas ───────────────────────────────────────────────────────────────────
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    UserV1:
+      type: object
+      properties:
+        id:        { type: integer }
+        name:      { type: string }
+        email:     { type: string, format: email }
+        phone:     { type: string }
+        ssn:       { type: string, description: "PII — not redacted in v1" }
+        address:   { type: string }
+
+    PaymentV1:
+      type: object
+      properties:
+        id:          { type: integer }
+        amount:      { type: number }
+        currency:    { type: string }
+        card_number: { type: string, description: "PCI data — not masked in v1" }
+        card_cvv:    { type: string }
+        status:      { type: string }
+
+    LegacyPayment:
+      type: object
+      properties:
+        transaction_id: { type: string }
+        amount:         { type: number }
+        currency:       { type: string }
+        status:         { type: string }
+        timestamp:      { type: string, format: date-time }
