@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import asyncio
 import os
+import uuid
 from contextlib import asynccontextmanager
 
 import structlog  # type: ignore[import]
-from fastapi import FastAPI  # type: ignore[import]
+import structlog.contextvars  # type: ignore[import]
+from fastapi import FastAPI, Request, Response  # type: ignore[import]
 from fastapi.middleware.cors import CORSMiddleware  # type: ignore[import]
+from starlette.middleware.base import BaseHTTPMiddleware  # type: ignore[import]
 from slowapi import Limiter, _rate_limit_exceeded_handler  # type: ignore[import]
 from slowapi.errors import RateLimitExceeded  # type: ignore[import]
 from slowapi.util import get_remote_address  # type: ignore[import]
@@ -16,57 +19,99 @@ from agent.consumer import run_consumer
 from agent.graph import build_graph, build_graph_in_memory
 from api.routes import router
 from api.auth import auth_router
+from db.sensors import SensorRegistry
 
 log = structlog.get_logger()
 
-# ── Rate limiter (shared instance used in routes.py via request.app.state) ─────
 limiter = Limiter(key_func=get_remote_address)
 
 
+class RequestIDMiddleware(BaseHTTPMiddleware):
+    """Passthrough middleware that attaches a correlation ID to every request.
+
+    Priority: use the incoming X-Request-ID header value if present;
+    otherwise generate a new UUID4. The ID is bound to the structlog
+    context so every log line in the request lifecycle includes it,
+    then echoed back in the response header.
+    """
+
+    async def dispatch(self, request: Request, call_next) -> Response:
+        request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+        structlog.contextvars.clear_contextvars()
+        structlog.contextvars.bind_contextvars(request_id=request_id)
+        response: Response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
+        return response
+
+
 def _get_allowed_origins() -> list[str]:
-    """
-    Read ALLOWED_ORIGINS env var (comma-separated) and always include localhost
-    for development. Falls back to permissive wildcard only in development mode.
-    """
     raw = os.getenv("ALLOWED_ORIGINS", "")
     origins = [o.strip() for o in raw.split(",") if o.strip()]
-
-    # Always allow the default UI ports for dev convenience
     for dev_origin in ["http://localhost:3000", "http://127.0.0.1:3000"]:
         if dev_origin not in origins:
             origins.append(dev_origin)
-
-    env = os.getenv("ENVIRONMENT", "development")
-    if not origins or env == "development":
-        # In dev, also allow wildcard — production must set ALLOWED_ORIGINS explicitly
-        if env != "production":
-            origins = ["*"]
-
+    if os.getenv("ENVIRONMENT", "development") != "production":
+        origins = ["*"]
     return origins
 
 
 def _log_startup_config() -> None:
-    """Log a startup summary of which optional features are configured."""
-    env     = os.getenv("ENVIRONMENT", "development")
-    secret  = os.getenv("SECRET_KEY", "")
-    is_weak = not secret or secret.startswith("changeme")
+    env      = os.getenv("ENVIRONMENT", "development")
+    is_prod  = env == "production"
+    secret   = os.getenv("SECRET_KEY", "")
+    is_weak  = not secret or secret.startswith("changeme")
+
+    has_anthropic = bool(os.getenv("ANTHROPIC_API_KEY"))
+    has_groq      = bool(os.getenv("GROQ_API_KEY"))
+    has_github    = bool(os.getenv("GITHUB_TOKEN"))
+    has_redis_pw  = bool(os.getenv("REDIS_PASSWORD"))
 
     log.info("=== AuralisAPI Remediation Brain — startup config ===")
-    log.info("environment",        value=env)
-    log.info("anthropic_api_key",  value="[SET]" if os.getenv("ANTHROPIC_API_KEY") else "[MISSING — heuristic fallback active]")
-    log.info("groq_api_key",       value="[SET]" if os.getenv("GROQ_API_KEY") else "[MISSING]")
-    log.info("github_token",       value="[SET]" if os.getenv("GITHUB_TOKEN") else "[MISSING — GitHub PR creation disabled]")
-    log.info("github_repo",        value=os.getenv("GITHUB_REPO", "[not set]"))
-    log.info("redis_password",     value="[SET]" if os.getenv("REDIS_PASSWORD") else "[none — Redis unauthenticated]")
-    log.info("secret_key",         value="[WEAK — set SECRET_KEY in production!]" if is_weak else "[SET]")
-    log.info("allowed_origins",    value=_get_allowed_origins())
-    log.info("admin_email",        value=os.getenv("ADMIN_EMAIL", "admin@auralisapi.dev"))
+    log.info("environment", value=env)
 
-    if env == "production" and is_weak:
+    # Log each var: INFO when set, WARNING when absent/weak so operators notice missing config.
+    _lvl = log.warning if (is_prod and not has_anthropic) else log.info
+    _lvl("anthropic_api_key", value="[SET]" if has_anthropic else "[MISSING — heuristic fallback active]")
+
+    (log.info if has_groq else log.warning)(
+        "groq_api_key", value="[SET]" if has_groq else "[MISSING — Groq fallback disabled]"
+    )
+    (log.info if has_github else log.warning)(
+        "github_token", value="[SET]" if has_github else "[MISSING — GitHub PR creation disabled]"
+    )
+    (log.info if has_redis_pw else log.warning)(
+        "redis_password", value="[SET]" if has_redis_pw else "[none — Redis unauthenticated, OK for dev]"
+    )
+    (log.info if not is_weak else log.warning)(
+        "secret_key", value="[SET]" if not is_weak else "[WEAK — set SECRET_KEY in production!]"
+    )
+    log.info("allowed_origins", value=_get_allowed_origins())
+
+    if is_prod and is_weak:
         log.critical(
-            "SECURITY: SECRET_KEY is set to the default placeholder — "
+            "SECURITY: SECRET_KEY is the default placeholder — "
             "JWT tokens are insecure. Set SECRET_KEY to a random 64-char string."
         )
+    if is_prod and not has_anthropic:
+        log.critical(
+            "DEGRADED: ANTHROPIC_API_KEY is not set in production — "
+            "incident reports will fall back to heuristic summaries. "
+            "Set ANTHROPIC_API_KEY for full LLM-powered remediation."
+        )
+
+
+async def _make_asyncpg_pool(db_url: str):
+    """Create an asyncpg connection pool for application queries (sensor registry etc.)."""
+    import asyncpg  # type: ignore[import]
+    # asyncpg uses postgresql:// — strip SQLAlchemy's +asyncpg dialect prefix if present.
+    url = db_url.replace("postgresql+asyncpg://", "postgresql://")
+    return await asyncpg.create_pool(url, min_size=2, max_size=10, command_timeout=10)
+
+
+async def _make_redis_pool(redis_url: str):
+    """Create a shared aioredis connection pool for request handlers."""
+    import redis.asyncio as aioredis  # type: ignore[import]
+    return aioredis.ConnectionPool.from_url(redis_url, max_connections=20, decode_responses=True)
 
 
 async def _start_consumer(app: FastAPI) -> asyncio.Task:
@@ -88,9 +133,38 @@ async def lifespan(app: FastAPI):
         "LANGGRAPH_DB_URL",
         "postgresql://auralis:auralis@postgres:5432/auralis",
     )
-
+    asyncpg_pool = None
+    redis_pool   = None
     consumer_task: asyncio.Task | None = None
 
+    # ── Shared infrastructure ──────────────────────────────────────────────────
+    redis_url = os.getenv("REDIS_URL", "redis://redis:6379")
+    redis_password = os.getenv("REDIS_PASSWORD", "")
+    if redis_password and "://" in redis_url and "@" not in redis_url:
+        redis_url = redis_url.replace("redis://", f"redis://:{redis_password}@", 1)
+
+    try:
+        redis_pool = await _make_redis_pool(redis_url)
+        app.state.redis_pool = redis_pool
+        log.info("shared Redis pool created")
+    except Exception as exc:
+        log.warning("Redis pool creation failed — handlers will create per-request clients", error=str(exc))
+        app.state.redis_pool = None
+
+    try:
+        asyncpg_pool = await _make_asyncpg_pool(raw_db_url)
+        app.state.asyncpg_pool = asyncpg_pool
+        log.info("asyncpg pool created")
+    except Exception as exc:
+        log.warning("asyncpg pool creation failed — sensor registry will use in-memory mode", error=str(exc))
+        app.state.asyncpg_pool = None
+
+    # Initialise sensor registry (PostgreSQL-backed or in-memory fallback)
+    registry = SensorRegistry(pool=app.state.asyncpg_pool)
+    await registry.setup()
+    app.state.sensor_registry = registry
+
+    # ── LangGraph checkpointer ─────────────────────────────────────────────────
     try:
         from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver  # type: ignore[import]
         async with AsyncPostgresSaver.from_conn_string(raw_db_url) as checkpointer:
@@ -119,6 +193,14 @@ async def lifespan(app: FastAPI):
             pass
         log.info("remediation-brain shut down")
 
+    finally:
+        if asyncpg_pool:
+            await asyncpg_pool.close()
+            log.info("asyncpg pool closed")
+        if redis_pool:
+            await redis_pool.aclose()
+            log.info("Redis pool closed")
+
 
 def create_app() -> FastAPI:
     app = FastAPI(
@@ -128,11 +210,9 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    # ── Rate limiter ──────────────────────────────────────────────────────────
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-    # ── CORS ──────────────────────────────────────────────────────────────────
     origins = _get_allowed_origins()
     app.add_middleware(
         CORSMiddleware,
@@ -141,10 +221,17 @@ def create_app() -> FastAPI:
         allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type", "X-Sensor-ID", "X-Sensor-Token"],
     )
+    app.add_middleware(RequestIDMiddleware)
 
-    # ── Routes ────────────────────────────────────────────────────────────────
-    app.include_router(auth_router)   # /auth/token  (unauthenticated login)
-    app.include_router(router)        # all other endpoints
+    try:
+        from prometheus_fastapi_instrumentator import Instrumentator  # type: ignore[import]
+        Instrumentator().instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
+        log.info("Prometheus metrics exposed at /metrics")
+    except ImportError:
+        log.warning("prometheus-fastapi-instrumentator not installed — /metrics unavailable")
+
+    app.include_router(auth_router)
+    app.include_router(router)
     return app
 
 

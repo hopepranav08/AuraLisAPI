@@ -21,12 +21,10 @@ import asyncio
 import json
 import os
 import re
-import time as _time
 import uuid
 from typing import Any, Optional
 
 import httpx  # type: ignore[import]
-import redis.asyncio as aioredis  # type: ignore[import]
 import structlog  # type: ignore[import]
 from fastapi import APIRouter, Depends, HTTPException, Request, status  # type: ignore[import]
 from pydantic import BaseModel  # type: ignore[import]
@@ -71,10 +69,23 @@ def _redis_url() -> str:
     password = os.getenv("REDIS_PASSWORD", "")
     host     = os.getenv("REDIS_HOST", "redis:6379")
     base     = os.getenv("REDIS_URL", f"redis://{host}")
-    if password and ":" not in base.split("@")[0].split("//")[-1]:
-        # Inject password: redis://host → redis://:password@host
+    if password and "@" not in base:
         base = base.replace("redis://", f"redis://:{password}@", 1)
     return base
+
+
+def _get_redis(request: Request):
+    """
+    Return a Redis client backed by the shared connection pool when available.
+    Falls back to a per-request client when pool is not initialised (dev/test).
+    Callers should use this as an async context manager:
+        async with _get_redis(request) as client: ...
+    """
+    import redis.asyncio as _aioredis  # type: ignore[import]
+    pool = getattr(request.app.state, "redis_pool", None)
+    if pool:
+        return _aioredis.Redis(connection_pool=pool)
+    return _aioredis.from_url(_redis_url(), decode_responses=True)
 
 
 # ── Health ────────────────────────────────────────────────────────────────────
@@ -82,6 +93,55 @@ def _redis_url() -> str:
 @router.get("/health", tags=["System"])
 async def health_check():
     return {"status": "ok", "service": "remediation-brain"}
+
+
+@router.get("/health/live", tags=["System"])
+async def health_live():
+    """Kubernetes/Docker liveness probe — always 200 if the process is running."""
+    return {"status": "alive"}
+
+
+@router.get("/health/ready", tags=["System"])
+async def health_ready(request: Request):
+    """
+    Readiness probe — returns 200 only when all backing services are reachable.
+    Checks: asyncpg pool (SELECT 1) + Redis pool (PING).
+    Returns 503 with details when any dependency is down.
+    """
+    checks: dict[str, str] = {}
+    healthy = True
+
+    pool = getattr(request.app.state, "asyncpg_pool", None)
+    if pool is not None:
+        try:
+            async with pool.acquire() as conn:
+                await conn.fetchval("SELECT 1")
+            checks["postgres"] = "ok"
+        except Exception as exc:
+            checks["postgres"] = f"error: {exc}"
+            healthy = False
+    else:
+        checks["postgres"] = "unavailable (no pool)"
+
+    redis_pool = getattr(request.app.state, "redis_pool", None)
+    if redis_pool is not None:
+        try:
+            import redis.asyncio as aioredis  # type: ignore[import]
+            async with aioredis.Redis(connection_pool=redis_pool) as client:
+                await client.ping()
+            checks["redis"] = "ok"
+        except Exception as exc:
+            checks["redis"] = f"error: {exc}"
+            healthy = False
+    else:
+        checks["redis"] = "unavailable (no pool)"
+
+    status_code = 200 if healthy else 503
+    from fastapi.responses import JSONResponse  # type: ignore[import]
+    return JSONResponse(
+        content={"status": "ready" if healthy else "degraded", "checks": checks},
+        status_code=status_code,
+    )
 
 
 # ── Gone stub ─────────────────────────────────────────────────────────────────
@@ -114,7 +174,7 @@ _DRIFT_WINDOW_SECS = 60
 
 
 @router.get("/drift/stats", tags=["Drift"])
-async def proxy_drift_stats():
+async def proxy_drift_stats(request: Request):
     """
     Serve per-endpoint drift stats.
 
@@ -140,20 +200,15 @@ async def proxy_drift_stats():
 
     # ── Strategy 2: Redis stream scan ─────────────────────────────────────────
     # Read recent stream entries and count ingress events per endpoint.
-    redis_url = os.getenv("REDIS_URL", "redis://redis:6379")
-    stream    = os.getenv("REDIS_STREAM", "auralis:events")
-
-    import redis.asyncio as aioredis  # type: ignore[import]
     import time as _t
 
+    stream    = os.getenv("REDIS_STREAM", "auralis:events")
     cutoff_ms = int((_t.time() - _DRIFT_WINDOW_SECS) * 1000)
-    # Redis stream IDs are "<ms>-<seq>" — build a minimum ID from the cutoff.
-    min_id = f"{cutoff_ms}-0"
+    min_id    = f"{cutoff_ms}-0"
 
     counts: dict[str, int] = {}
     try:
-        client = aioredis.from_url(redis_url, decode_responses=True)
-        async with client:
+        async with _get_redis(request) as client:
             entries = await client.xrange(stream, min=min_id, max="+", count=500)
             for _eid, fields in entries:
                 raw = fields.get("data", "")
@@ -669,13 +724,12 @@ class HoneypotAlertPayload(BaseModel):
 
 
 @router.post("/webhooks/honeypot-alert", tags=["Webhooks"])
-async def receive_honeypot_alert(payload: HoneypotAlertPayload):
+async def receive_honeypot_alert(payload: HoneypotAlertPayload, request: Request):
     """
     Receive a deception hit from the dynamic honeypot server.
-    Input is sanitized before publishing to Redis.
+    Input is sanitized before publishing to Redis via the shared connection pool.
     """
-    redis_url = os.getenv("REDIS_URL", "redis://redis:6379")
-    stream    = "auralis:honeypot-events"
+    stream = "auralis:honeypot-events"
 
     # Sanitize inputs before storing in Redis stream
     src_ip  = payload.src_ip if _IP_RE.match(payload.src_ip) else "invalid"
@@ -702,12 +756,12 @@ async def receive_honeypot_alert(payload: HoneypotAlertPayload):
         node_id=payload.node_id,
     )
 
-    async with aioredis.from_url(redis_url, decode_responses=True) as client:
-        try:
+    try:
+        async with _get_redis(request) as client:
             await client.xadd(stream, {"data": json.dumps(event_data)}, maxlen=1000, approximate=True)
-        except Exception as exc:
-            log.warning("failed to publish honeypot event to Redis", error=str(exc))
-            # Return 200 anyway — the honeypot server must not retry on Redis failures.
+    except Exception as exc:
+        log.warning("failed to publish honeypot event to Redis", error=str(exc))
+        # Return 200 anyway — the honeypot server must not retry on Redis failures.
 
     return {"status": "received", "path": payload.path}
 
@@ -715,18 +769,13 @@ async def receive_honeypot_alert(payload: HoneypotAlertPayload):
 # ── Phase 5: Honeypot events feed ─────────────────────────────────────────────
 
 @router.get("/honeypot/events", tags=["Honeypot"])
-async def get_honeypot_events(limit: int = 50):
+async def get_honeypot_events(request: Request, limit: int = 50):
     """
     Return the most recent honeypot hit events from the auralis:honeypot-events Redis stream.
-    Used by the intelligence dashboard threat intel feed.
-
-    Events are returned newest-first (xrevrange). Each entry is the JSON payload
-    published by receive_honeypot_alert. The stream uses MAXLEN ~= 1000 so it
-    never grows unboundedly — this endpoint is safe to poll every 5 seconds.
+    Events are returned newest-first (xrevrange), via the shared connection pool.
     """
-    redis_url = os.getenv("REDIS_URL", "redis://redis:6379")
     try:
-        async with aioredis.from_url(redis_url, decode_responses=True) as client:
+        async with _get_redis(request) as client:
             raw_entries = await client.xrevrange("auralis:honeypot-events", count=limit)
         events = []
         for _entry_id, fields in raw_entries:
@@ -743,30 +792,27 @@ async def get_honeypot_events(limit: int = 50):
 
 # ── Company Sensor Registry (install.sh / remote sensor onboarding) ───────────
 #
-# Allows external sensors installed on company servers to register themselves
-# and forward captured events directly to this brain over HTTPS.
-# Sensor registry is in-memory — survives for the lifetime of the process.
-# In production this would be persisted to PostgreSQL.
+# Sensors register via POST /sensor/register and receive a bearer token.
+# Registrations are persisted to PostgreSQL via db.sensors.SensorRegistry
+# (in-memory fallback when DB is unavailable).
 
-import time as _time
-
-_sensor_registry: dict[str, dict] = {}   # sensor_id → {token, metadata}
-
-
-def _validate_sensor_token(request: Request) -> str:
+async def _validate_sensor_token(request: Request) -> str:
     """
-    Validate a sensor's bearer token against the registry.
+    Validate a sensor bearer token against the SensorRegistry.
+    Uses the shared registry (PostgreSQL-backed or in-memory fallback).
     Returns sensor_id on success, raises 401 on failure.
-    Sensors that haven't registered yet are rejected.
     """
     auth_header = request.headers.get("Authorization", "")
     if not auth_header.startswith("Bearer "):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sensor token required")
     token = auth_header.split("Bearer ", 1)[1].strip()
-    for sid, meta in _sensor_registry.items():
-        if meta.get("sensor_token") == token:
-            return sid
-    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unknown or invalid sensor token")
+    registry = getattr(request.app.state, "sensor_registry", None)
+    if registry is None:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Sensor registry not ready")
+    sensor_id = await registry.get_sensor_id_for_token(token)
+    if sensor_id is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unknown or invalid sensor token")
+    return sensor_id
 
 
 class SensorRegistration(BaseModel):
@@ -782,22 +828,23 @@ async def register_sensor(payload: SensorRegistration, request: Request):
     Called by the eBPF sensor on startup when BRAIN_URL is configured.
     Returns a sensor_token that must be sent as 'Authorization: Bearer <token>'
     on all subsequent /sensor/ingest calls.
+    Registrations are persisted to PostgreSQL (in-memory fallback when DB is down).
     """
-    sensor_id    = payload.sensor_id or f"sensor-{uuid.uuid4().hex[:8]}"
-    sensor_token = str(uuid.uuid4())
-    _sensor_registry[sensor_id] = {
-        "sensor_id":      sensor_id,
-        "sensor_token":   sensor_token,
-        "hostname":       payload.hostname,
-        "mode":           payload.mode,
-        "version":        payload.version,
-        "ip":             request.client.host if request.client else "unknown",
-        "registered_at":  _time.time(),
-        "last_seen":      _time.time(),
-        "events_forwarded": 0,
-    }
+    registry  = request.app.state.sensor_registry
+    sensor_id = payload.sensor_id or f"sensor-{uuid.uuid4().hex[:8]}"
+    token     = str(uuid.uuid4())
+    ip        = request.client.host if request.client else "unknown"
+
+    await registry.register(
+        sensor_id=sensor_id,
+        token=token,
+        hostname=payload.hostname,
+        mode=payload.mode,
+        version=payload.version,
+        ip=ip,
+    )
     log.info("sensor registered", sensor_id=sensor_id, hostname=payload.hostname)
-    return {"status": "registered", "sensor_id": sensor_id, "sensor_token": sensor_token}
+    return {"status": "registered", "sensor_id": sensor_id, "sensor_token": token}
 
 
 @router.post("/sensor/ingest", tags=["Sensor Onboarding"])
@@ -806,28 +853,23 @@ async def ingest_sensor_event(request: Request):
     """
     Accepts raw event JSON forwarded by a remote eBPF sensor.
     Requires 'Authorization: Bearer <sensor_token>' from /sensor/register.
-    Publishes the event to the Redis stream.
+    Publishes the event to the Redis stream via the shared connection pool.
     """
-    sensor_id = _validate_sensor_token(request)
+    sensor_id = await _validate_sensor_token(request)
     try:
-        body = await request.body()
+        body       = await request.body()
         event_data = json.loads(body)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON payload")
 
-    # Update registry last_seen + event counter
-    if sensor_id in _sensor_registry:
-        _sensor_registry[sensor_id]["last_seen"] = _time.time()
-        _sensor_registry[sensor_id]["events_forwarded"] += 1
+    # Persist last_seen + increment counter (non-blocking best-effort)
+    asyncio.create_task(request.app.state.sensor_registry.touch(sensor_id))
 
-    # Ensure event_type is present so the consumer's _should_process filter works
-    # correctly. Remote sensors may omit it; default to "http_event".
     event_data.setdefault("event_type", "http_event")
 
-    redis_url = os.getenv("REDIS_URL", "redis://redis:6379")
-    stream    = os.getenv("REDIS_STREAM", "auralis:events")
+    stream = os.getenv("REDIS_STREAM", "auralis:events")
     try:
-        async with aioredis.from_url(redis_url, decode_responses=True) as client:
+        async with _get_redis(request) as client:
             await client.xadd(stream, {"data": json.dumps(event_data)}, maxlen=10000, approximate=True)
     except Exception as exc:
         log.warning("sensor ingest: redis publish failed", error=str(exc))
@@ -837,27 +879,10 @@ async def ingest_sensor_event(request: Request):
 
 
 @router.get("/sensors", tags=["Sensor Onboarding"])
-async def list_sensors():
-    """
-    Returns all registered remote sensors.
-    Used by the dashboard 'Connect Your Infrastructure' panel.
-    """
-    now = _time.time()
-    sensors = []
-    for s in _sensor_registry.values():
-        sensors.append({
-            "sensor_id":        s["sensor_id"],
-            "hostname":         s["hostname"],
-            "mode":             s["mode"],
-            "version":          s["version"],
-            "ip":               s["ip"],
-            "registered_at":    s["registered_at"],
-            "last_seen":        s["last_seen"],
-            "events_forwarded": s["events_forwarded"],
-            "online":           (now - s["last_seen"]) < 60,
-            "last_seen_ago_s":  round(now - s["last_seen"]),
-            # sensor_token is intentionally omitted from list response
-        })
+async def list_sensors(request: Request):
+    """Returns all registered remote sensors (sensor_token excluded)."""
+    registry = request.app.state.sensor_registry
+    sensors  = await registry.list_all()
     return {"sensors": sensors, "total": len(sensors)}
 
 

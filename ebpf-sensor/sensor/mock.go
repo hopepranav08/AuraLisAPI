@@ -167,6 +167,7 @@ func (s *mockSensor) replayFile(ctx context.Context, path string) error {
 			s.log.Error("redis publish failed", zap.Error(err))
 			continue
 		}
+		MetricEventsPublished.Add(1)
 
 		// Forward to remote brain if configured (company install mode).
 		s.reporter.Report(ctx, payload)
@@ -178,8 +179,16 @@ func (s *mockSensor) replayFile(ctx context.Context, path string) error {
 
 		s.log.Debug("published mock event", zap.String("path", fmt.Sprintf("%v", raw["path"])))
 
-		// Simulate ~100ms inter-event delay.
-		time.Sleep(100 * time.Millisecond)
+		// Inter-event delay — configurable via REPLAY_DELAY_MS (default 100ms).
+		delayMs := s.cfg.ReplayDelayMs
+		if delayMs <= 0 {
+			delayMs = 100
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(time.Duration(delayMs) * time.Millisecond):
+		}
 	}
 
 	return scanner.Err()
@@ -265,6 +274,7 @@ func (s *mockSensor) publishDriftAlert(ctx context.Context, alert DriftAlert) er
 		return fmt.Errorf("json marshal drift alert: %w", err)
 	}
 
+	MetricDriftAlarmsTotal.Add(1)
 	s.log.Info("drift alert fired",
 		zap.String("endpoint", alert.Endpoint),
 		zap.String("alarm_type", alert.AlarmType),

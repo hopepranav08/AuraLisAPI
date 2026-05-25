@@ -36,6 +36,10 @@ _COUNT = 10
 # Maximum concurrent LangGraph invocations — prevents event storm overload.
 _MAX_CONCURRENT = 4
 
+# Seconds to wait for in-flight graph invocations to finish on SIGTERM before
+# force-cancelling them. PostgreSQL checkpointing means partial state is safe.
+_MAX_DRAIN_SECONDS: float = float(os.getenv("MAX_DRAIN_SECONDS", "30"))
+
 # ── Per-path deduplication window ─────────────────────────────────────────────
 # Prevents creating one LangGraph incident per Redis event when a deprecated
 # endpoint receives a burst of traffic (e.g. 20 attack requests in 3 seconds
@@ -281,9 +285,22 @@ async def run_consumer(app_state: Any, redis_url: str, stream: str) -> None:
                     task.add_done_callback(background_tasks.discard)
 
     except asyncio.CancelledError:
-        log.info("Redis consumer shutting down — waiting for in-flight tasks",
-                 pending=len(background_tasks))
+        pending = len(background_tasks)
+        log.info("Redis consumer shutting down — draining in-flight tasks",
+                 pending=pending, timeout_s=_MAX_DRAIN_SECONDS)
         if background_tasks:
-            await asyncio.gather(*background_tasks, return_exceptions=True)
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*background_tasks, return_exceptions=True),
+                    timeout=_MAX_DRAIN_SECONDS,
+                )
+                log.info("consumer drain complete", drained=pending)
+            except asyncio.TimeoutError:
+                log.warning(
+                    "consumer drain timed out — force-cancelling remaining tasks",
+                    remaining=len([t for t in background_tasks if not t.done()]),
+                )
+                for task in background_tasks:
+                    task.cancel()
     finally:
         await client.aclose()
