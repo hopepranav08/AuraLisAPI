@@ -24,9 +24,9 @@
 #       # pool closes here on shutdown
 from __future__ import annotations
 
-from langgraph.graph import StateGraph, END
-from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import StateGraph, END  # type: ignore[import]
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver  # type: ignore[import]
+from langgraph.checkpoint.memory import MemorySaver  # type: ignore[import]
 
 from agent.state import IncidentState
 from agent import nodes
@@ -58,8 +58,10 @@ def build_graph(checkpointer=None):
     builder.add_edge("analyze",  "plan")
 
     # Conditional routing after plan:
-    #   critical/high severity (enforcement_approved=True)  → enforce
-    #   medium/low severity (enforcement_approved=False)    → generate_report
+    #   critical/high severity  → enforce (graph pauses at interrupt_before gate)
+    #   medium/low severity     → generate_report (no enforcement warranted)
+    # When resumed via POST /approve → enforce runs → generate_report
+    # When rejected via POST /reject → routed externally to generate_report
     builder.add_conditional_edges(
         "plan",
         nodes.should_enforce,
@@ -68,6 +70,7 @@ def build_graph(checkpointer=None):
             "report":  "generate_report",
         },
     )
+
 
     builder.add_edge("enforce",         "generate_report")
     builder.add_edge("generate_report", END)

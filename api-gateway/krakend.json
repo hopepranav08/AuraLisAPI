@@ -4,7 +4,7 @@
     "name": "AuralisAPI Gateway",
     "port": 8080,
     "timeout": "10s",
-    "cache_ttl": "300s",
+    "cache_ttl": "0s",
     "output_encoding": "json",
     "extra_config": {
         "telemetry/logging": {
@@ -15,82 +15,263 @@
         },
         "security/cors": {
             "allow_origins": ["*"],
-            "allow_methods": ["GET", "POST", "PUT", "DELETE", "PATCH"],
-            "allow_headers": ["Authorization", "Content-Type"],
+            "allow_methods": ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+            "allow_headers": ["Authorization", "Content-Type", "X-Sensor-ID"],
             "expose_headers": ["Content-Length"],
             "max_age": "12h"
         }
     },
     "endpoints": [
+
         {
-            "endpoint": "/api/brain/health",
+            "endpoint": "/brain/health",
             "method": "GET",
             "output_encoding": "json",
-            "backend": [
-                {
-                    "url_pattern": "/health",
-                    "host": ["http://remediation-brain:8000"],
-                    "encoding": "json"
-                }
-            ]
+            "backend": [{ "url_pattern": "/health", "host": ["http://remediation-brain:8000"], "encoding": "json" }]
         },
+
         {
-            "endpoint": "/api/inventory",
+            "endpoint": "/brain/inventory",
             "method": "GET",
             "output_encoding": "json",
-            "backend": [
-                {
-                    "url_pattern": "/inventory",
-                    "host": ["http://remediation-brain:8000"],
-                    "encoding": "json"
-                }
-            ]
+            "backend": [{ "url_pattern": "/inventory", "host": ["http://remediation-brain:8000"], "encoding": "json" }]
         },
+
         {
-            "endpoint": "/api/incidents",
+            "endpoint": "/brain/incidents",
             "method": "GET",
             "output_encoding": "json",
-            "backend": [
-                {
-                    "url_pattern": "/incidents",
-                    "host": ["http://remediation-brain:8000"],
-                    "encoding": "json"
-                }
-            ]
+            "input_query_strings": ["limit", "deduplicate"],
+            "backend": [{ "url_pattern": "/incidents", "host": ["http://remediation-brain:8000"], "encoding": "json" }]
         },
+
         {
-            "endpoint": "/api/remediate",
+            "endpoint": "/brain/incidents/{thread_id}",
+            "method": "GET",
+            "output_encoding": "json",
+            "backend": [{ "url_pattern": "/incidents/{thread_id}", "host": ["http://remediation-brain:8000"], "encoding": "json" }]
+        },
+
+        {
+            "endpoint": "/brain/incidents/{thread_id}/approve",
             "method": "POST",
             "output_encoding": "json",
-            "backend": [
-                {
-                    "url_pattern": "/remediate",
-                    "host": ["http://remediation-brain:8000"],
-                    "encoding": "json"
+            "backend": [{ "url_pattern": "/incidents/{thread_id}/approve", "host": ["http://remediation-brain:8000"], "encoding": "json" }]
+        },
+
+        {
+            "endpoint": "/brain/incidents/{thread_id}/reject",
+            "method": "POST",
+            "output_encoding": "json",
+            "backend": [{ "url_pattern": "/incidents/{thread_id}/reject", "host": ["http://remediation-brain:8000"], "encoding": "json" }]
+        },
+
+        {
+            "endpoint": "/brain/remediate",
+            "method": "POST",
+            "output_encoding": "json",
+            "backend": [{ "url_pattern": "/remediate", "host": ["http://remediation-brain:8000"], "encoding": "json" }]
+        },
+
+        {
+            "endpoint": "/brain/gateway/config",
+            "method": "GET",
+            "output_encoding": "json",
+            "backend": [{ "url_pattern": "/gateway/config", "host": ["http://remediation-brain:8000"], "encoding": "json" }]
+        },
+
+        {
+            "endpoint": "/brain/gateway/quarantine",
+            "method": "POST",
+            "output_encoding": "json",
+            "backend": [{ "url_pattern": "/gateway/quarantine", "host": ["http://remediation-brain:8000"], "encoding": "json" }]
+        },
+
+        {
+            "endpoint": "/brain/honeypot/events",
+            "method": "GET",
+            "output_encoding": "json",
+            "input_query_strings": ["limit"],
+            "backend": [{ "url_pattern": "/honeypot/events", "host": ["http://remediation-brain:8000"], "encoding": "json" }]
+        },
+
+        {
+            "endpoint": "/brain/webhooks/honeypot-alert",
+            "method": "POST",
+            "output_encoding": "json",
+            "backend": [{ "url_pattern": "/webhooks/honeypot-alert", "host": ["http://remediation-brain:8000"], "encoding": "json" }]
+        },
+
+        {
+            "endpoint": "/brain/sensors",
+            "method": "GET",
+            "output_encoding": "json",
+            "backend": [{ "url_pattern": "/sensors", "host": ["http://remediation-brain:8000"], "encoding": "json" }]
+        },
+
+        {
+            "endpoint": "/brain/sensor/register",
+            "method": "POST",
+            "output_encoding": "json",
+            "backend": [{ "url_pattern": "/sensor/register", "host": ["http://remediation-brain:8000"], "encoding": "json" }]
+        },
+
+        {
+            "endpoint": "/brain/sensor/ingest",
+            "method": "POST",
+            "output_encoding": "json",
+            "input_headers": ["X-Sensor-ID"],
+            "backend": [{ "url_pattern": "/sensor/ingest", "host": ["http://remediation-brain:8000"], "encoding": "json" }]
+        },
+
+        {
+            "endpoint": "/drift/stats",
+            "method": "GET",
+            "output_encoding": "json",
+            "backend": [{ "url_pattern": "/drift/stats", "host": ["http://remediation-brain:8000"], "encoding": "json" }]
+        },
+
+        {
+            "endpoint": "/drift/health",
+            "method": "GET",
+            "output_encoding": "json",
+            "backend": [{ "url_pattern": "/drift/health", "host": ["http://remediation-brain:8000"], "encoding": "json" }]
+        },
+
+        {
+            "endpoint": "/api/v2/{endpoint}",
+            "method": "GET",
+            "output_encoding": "json",
+            "backend": [{ "url_pattern": "/gone", "host": ["http://remediation-brain:8000"], "encoding": "json" }],
+            "extra_config": {
+                "proxy/static": {
+                    "data": { "error": "Gone", "code": 410, "message": "This API version has been decommissioned. Migrate to /api/v3/. See OWASP API9:2023.", "sunset": "2025-01-01T00:00:00Z" },
+                    "strategy": "always",
+                    "status_code": 410
                 }
-            ]
+            }
+        },
+        {
+            "endpoint": "/api/v2/{endpoint}",
+            "method": "POST",
+            "output_encoding": "json",
+            "backend": [{ "url_pattern": "/gone", "host": ["http://remediation-brain:8000"], "encoding": "json" }],
+            "extra_config": {
+                "proxy/static": {
+                    "data": { "error": "Gone", "code": 410, "message": "This API version has been decommissioned. Migrate to /api/v3/.", "sunset": "2025-01-01T00:00:00Z" },
+                    "strategy": "always",
+                    "status_code": 410
+                }
+            }
+        },
+        {
+            "endpoint": "/api/v2/{endpoint}/{sub}",
+            "method": "GET",
+            "output_encoding": "json",
+            "backend": [{ "url_pattern": "/gone", "host": ["http://remediation-brain:8000"], "encoding": "json" }],
+            "extra_config": {
+                "proxy/static": {
+                    "data": { "error": "Gone", "code": 410, "message": "This API version has been decommissioned. Migrate to /api/v3/.", "sunset": "2025-01-01T00:00:00Z" },
+                    "strategy": "always",
+                    "status_code": 410
+                }
+            }
+        },
+        {
+            "endpoint": "/api/v1/legacy-payments",
+            "method": "GET",
+            "output_encoding": "json",
+            "backend": [{ "url_pattern": "/gone", "host": ["http://remediation-brain:8000"], "encoding": "json" }],
+            "extra_config": {
+                "proxy/static": {
+                    "data": {
+                        "error":   "Gone",
+                        "code":    410,
+                        "message": "The /api/v1/legacy-payments endpoint has been decommissioned. Migrate to /api/v3/payments. See OWASP API9:2023.",
+                        "sunset":  "2025-01-01T00:00:00Z"
+                    },
+                    "strategy": "always",
+                    "status_code": 410
+                }
+            }
+        },
+        {
+            "endpoint": "/api/v1/legacy-payments",
+            "method": "POST",
+            "output_encoding": "json",
+            "backend": [{ "url_pattern": "/gone", "host": ["http://remediation-brain:8000"], "encoding": "json" }],
+            "extra_config": {
+                "proxy/static": {
+                    "data": {
+                        "error":   "Gone",
+                        "code":    410,
+                        "message": "The /api/v1/legacy-payments endpoint has been decommissioned. Migrate to /api/v3/payments. See OWASP API9:2023.",
+                        "sunset":  "2025-01-01T00:00:00Z"
+                    },
+                    "strategy": "always",
+                    "status_code": 410
+                }
+            }
+        },
+        {
+            "endpoint": "/api/v1/legacy-payments/{sub}",
+            "method": "GET",
+            "output_encoding": "json",
+            "backend": [{ "url_pattern": "/gone", "host": ["http://remediation-brain:8000"], "encoding": "json" }],
+            "extra_config": {
+                "proxy/static": {
+                    "data": {
+                        "error":   "Gone",
+                        "code":    410,
+                        "message": "The /api/v1/legacy-payments endpoint has been decommissioned. Migrate to /api/v3/payments. See OWASP API9:2023.",
+                        "sunset":  "2025-01-01T00:00:00Z"
+                    },
+                    "strategy": "always",
+                    "status_code": 410
+                }
+            }
+        },
+        {
+            "endpoint": "/api/v1/legacy-payments/{sub}",
+            "method": "POST",
+            "output_encoding": "json",
+            "backend": [{ "url_pattern": "/gone", "host": ["http://remediation-brain:8000"], "encoding": "json" }],
+            "extra_config": {
+                "proxy/static": {
+                    "data": {
+                        "error":   "Gone",
+                        "code":    410,
+                        "message": "The /api/v1/legacy-payments endpoint has been decommissioned. Migrate to /api/v3/payments. See OWASP API9:2023.",
+                        "sunset":  "2025-01-01T00:00:00Z"
+                    },
+                    "strategy": "always",
+                    "status_code": 410
+                }
+            }
         },
         {
             "endpoint": "/api/v1/{endpoint}",
             "method": "GET",
             "output_encoding": "json",
-            "backend": [
-                {
-                    "url_pattern": "/gone",
-                    "host": ["http://remediation-brain:8000"],
-                    "encoding": "json"
-                }
-            ],
+            "backend": [{ "url_pattern": "/gone", "host": ["http://remediation-brain:8000"], "encoding": "json" }],
             "extra_config": {
                 "proxy/static": {
-                    "data": {
-                        "error": "Gone",
-                        "code": 410,
-                        "message": "This API version has been decommissioned per OWASP API9:2023. Migrate to /api/v3/.",
-                        "sunset": "2025-01-01T00:00:00Z",
-                        "docs": "https://github.com/your-org/auralisapi/blob/main/MIGRATION.md"
-                    },
-                    "strategy": "always"
+                    "data": { "error": "Gone", "code": 410, "message": "This API version has been decommissioned. Migrate to /api/v3/. See OWASP API9:2023.", "sunset": "2025-01-01T00:00:00Z" },
+                    "strategy": "always",
+                    "status_code": 410
+                }
+            }
+        },
+        {
+            "endpoint": "/api/v1/{endpoint}",
+            "method": "POST",
+            "output_encoding": "json",
+            "backend": [{ "url_pattern": "/gone", "host": ["http://remediation-brain:8000"], "encoding": "json" }],
+            "extra_config": {
+                "proxy/static": {
+                    "data": { "error": "Gone", "code": 410, "message": "This API version has been decommissioned. Migrate to /api/v3/.", "sunset": "2025-01-01T00:00:00Z" },
+                    "strategy": "always",
+                    "status_code": 410
                 }
             }
         },
@@ -98,45 +279,12 @@
             "endpoint": "/api/v1/{endpoint}/{sub}",
             "method": "GET",
             "output_encoding": "json",
-            "backend": [
-                {
-                    "url_pattern": "/gone",
-                    "host": ["http://remediation-brain:8000"],
-                    "encoding": "json"
-                }
-            ],
+            "backend": [{ "url_pattern": "/gone", "host": ["http://remediation-brain:8000"], "encoding": "json" }],
             "extra_config": {
                 "proxy/static": {
-                    "data": {
-                        "error": "Gone",
-                        "code": 410,
-                        "message": "This API version has been decommissioned per OWASP API9:2023. Migrate to /api/v3/.",
-                        "sunset": "2025-01-01T00:00:00Z"
-                    },
-                    "strategy": "always"
-                }
-            }
-        },
-        {
-            "endpoint": "/api/v1/{endpoint}",
-            "method": "POST",
-            "output_encoding": "json",
-            "backend": [
-                {
-                    "url_pattern": "/gone",
-                    "host": ["http://remediation-brain:8000"],
-                    "encoding": "json"
-                }
-            ],
-            "extra_config": {
-                "proxy/static": {
-                    "data": {
-                        "error": "Gone",
-                        "code": 410,
-                        "message": "This API version has been decommissioned per OWASP API9:2023. Migrate to /api/v3/.",
-                        "sunset": "2025-01-01T00:00:00Z"
-                    },
-                    "strategy": "always"
+                    "data": { "error": "Gone", "code": 410, "message": "This API version has been decommissioned. Migrate to /api/v3/.", "sunset": "2025-01-01T00:00:00Z" },
+                    "strategy": "always",
+                    "status_code": 410
                 }
             }
         },
@@ -144,22 +292,12 @@
             "endpoint": "/api/v1/{endpoint}/{sub}",
             "method": "POST",
             "output_encoding": "json",
-            "backend": [
-                {
-                    "url_pattern": "/gone",
-                    "host": ["http://remediation-brain:8000"],
-                    "encoding": "json"
-                }
-            ],
+            "backend": [{ "url_pattern": "/gone", "host": ["http://remediation-brain:8000"], "encoding": "json" }],
             "extra_config": {
                 "proxy/static": {
-                    "data": {
-                        "error": "Gone",
-                        "code": 410,
-                        "message": "This API version has been decommissioned per OWASP API9:2023. Migrate to /api/v3/.",
-                        "sunset": "2025-01-01T00:00:00Z"
-                    },
-                    "strategy": "always"
+                    "data": { "error": "Gone", "code": 410, "message": "This API version has been decommissioned. Migrate to /api/v3/.", "sunset": "2025-01-01T00:00:00Z" },
+                    "strategy": "always",
+                    "status_code": 410
                 }
             }
         }

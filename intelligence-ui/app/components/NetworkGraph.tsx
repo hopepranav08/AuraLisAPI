@@ -28,248 +28,263 @@ interface Props {
 }
 
 function nodeRadius(d: GraphNode): number {
-    if (d.type === "gateway") return 22;
-    const base = Math.max(12, Math.min(24, 12 + (d.traffic / 10)));
-    return base;
+    if (d.type === "gateway") return 32;
+    return Math.max(14, Math.min(22, 14 + (d.traffic / 8)));
 }
 
-function nodeColor(d: GraphNode): string {
-    if (d.type === "gateway") return "#c084fc";          // violet — gateway
+function nodeFill(d: GraphNode): string {
+    if (d.type === "gateway") return "#1a1a1a";
     switch (d.classification) {
-        case "active_zombie":
-            return d.severity === "critical" ? "#fb7185" : "#fbbf24";
-        case "dormant_zombie":
-            return "#3f3f46";
-        case "shadow":
-            return "#f472b6";                            // hot pink
-        case "unknown":
-            return "#38bdf8";                            // sky cyan
-        default:
-            return "#4ade80";                            // lime green — healthy
+        case "active_zombie":  return d.severity === "critical" ? "#1a0000" : "#1a0d00";
+        case "dormant_zombie": return "#111111";
+        case "shadow":         return "#0d0d1a";
+        case "drifting":       return "#1a1500";
+        case "orphaned":       return "#1a001a";
+        default:               return "#0d1a0d";
     }
 }
 
-function nodeGlowColor(d: GraphNode): string {
-    if (d.type === "gateway") return "#c084fc";
+function nodeStroke(d: GraphNode): string {
+    if (d.type === "gateway") return "#a855f7";
     switch (d.classification) {
-        case "active_zombie":
-            return d.severity === "critical" ? "#fb7185" : "#fbbf24";
-        case "shadow":
-            return "#f472b6";
-        case "unknown":
-            return "#38bdf8";
-        default:
-            return "#4ade80";
+        case "active_zombie":  return d.severity === "critical" ? "#ff2727" : "#ff8c00";
+        case "dormant_zombie": return "#444444";
+        case "shadow":         return "#4080ff";
+        case "drifting":       return "#f59e0b";
+        case "orphaned":       return "#c026d3";
+        default:               return "#22c55e";
     }
 }
 
-function edgeColor(d: GraphEdge, nodeMap: Map<string, GraphNode>): string {
-    const targetId = typeof d.target === "object" ? (d.target as GraphNode).id : d.target;
-    const target = nodeMap.get(targetId);
-    if (!target) return "rgba(255,255,255,0.06)";
-    if (target.classification === "active_zombie") return "rgba(251,113,133,0.35)";
-    if (target.classification === "shadow") return "rgba(244,114,182,0.3)";
-    if (target.classification === "unknown") return "rgba(56,189,248,0.25)";
-    if (target.type === "gateway") return "rgba(192,132,252,0.2)";
-    return "rgba(74,222,128,0.15)";
+function nodeStrokeWidth(d: GraphNode): number {
+    if (d.type === "gateway") return 3;
+    return 1.5;
+}
+
+function edgeStroke(target: GraphNode | null): string {
+    if (!target) return "rgba(255,255,255,0.08)";
+    if (target.type === "gateway") return "rgba(168,85,247,0.25)";
+    switch (target.classification) {
+        case "active_zombie":
+            return target.severity === "critical" ? "rgba(255,39,39,0.4)" : "rgba(255,140,0,0.35)";
+        case "dormant_zombie": return "rgba(68,68,68,0.35)";
+        case "shadow":         return "rgba(64,128,255,0.3)";
+        case "drifting":       return "rgba(245,158,11,0.3)";
+        case "orphaned":       return "rgba(192,38,211,0.25)";
+        default:               return "rgba(34,197,94,0.25)";
+    }
+}
+
+function edgeMarker(target: GraphNode | null): string {
+    if (!target) return "url(#arrow-default)";
+    if (target.type === "gateway") return "url(#arrow-gateway)";
+    switch (target.classification) {
+        case "active_zombie":
+            return target.severity === "critical" ? "url(#arrow-zombie-crit)" : "url(#arrow-zombie-high)";
+        case "dormant_zombie": return "url(#arrow-dormant)";
+        case "shadow":         return "url(#arrow-shadow)";
+        case "drifting":       return "url(#arrow-drifting)";
+        case "orphaned":       return "url(#arrow-orphaned)";
+        default:               return "url(#arrow-healthy)";
+    }
 }
 
 export default function NetworkGraph({ nodes, edges, onNodeClick, selectedNodeId }: Props) {
-    const svgRef = useRef<SVGSVGElement>(null);
-    const simulationRef = useRef<d3.Simulation<GraphNode, GraphEdge> | null>(null);
+    const svgRef       = useRef<SVGSVGElement>(null);
     const containerRef = useRef<HTMLDivElement>(null);
-    const onNodeClickRef = useRef(onNodeClick);
-    const selectedNodeIdRef = useRef(selectedNodeId);
+    const simRef       = useRef<d3.Simulation<GraphNode, GraphEdge> | null>(null);
+    const onClickRef   = useRef(onNodeClick);
+    const selectedRef  = useRef(selectedNodeId);
+    // Keep latest prop values in refs so buildGraph does not need them as
+    // closure deps — prevents the simulation from being torn down and restarted
+    // on every 5-second poll cycle when the data hasn't actually changed.
+    const nodesRef     = useRef(nodes);
+    const edgesRef     = useRef(edges);
+    // Digest of the last rendered data; guards against spurious rebuilds.
+    const digestRef    = useRef("");
 
-    // Keep refs in sync so effect closures don't stale-close over callbacks
-    useEffect(() => { onNodeClickRef.current = onNodeClick; }, [onNodeClick]);
-    useEffect(() => { selectedNodeIdRef.current = selectedNodeId; }, [selectedNodeId]);
+    useEffect(() => { onClickRef.current  = onNodeClick; },    [onNodeClick]);
+    useEffect(() => { selectedRef.current = selectedNodeId; }, [selectedNodeId]);
 
+    // Sync refs during render — safe because refs are stable and this is
+    // synchronous (not inside an effect), ensuring buildGraph always reads the
+    // latest props no matter when it fires.
+    nodesRef.current = nodes;
+    edgesRef.current = edges;
+
+    // buildGraph is a stable function (empty dep array) that reads from refs.
+    // This prevents React from creating a new function reference on every render,
+    // which would retrigger the main useEffect and restart the D3 simulation.
     const buildGraph = useCallback(() => {
+        const nodes = nodesRef.current;
+        const edges = edgesRef.current;
         const svgEl = svgRef.current;
-        const containerEl = containerRef.current;
-        if (!svgEl || !containerEl) return;
+        const el    = containerRef.current;
+        if (!svgEl || !el) return;
 
-        // Stop any running simulation
-        if (simulationRef.current) {
-            simulationRef.current.stop();
-            simulationRef.current = null;
-        }
-
-        // Clear all SVG children
+        if (simRef.current) { simRef.current.stop(); simRef.current = null; }
         d3.select(svgEl).selectAll("*").remove();
 
-        const width = containerEl.clientWidth || 800;
-        const height = containerEl.clientHeight || 460;
+        const W = el.clientWidth  || 700;
+        const H = el.clientHeight || 460;
+        if (nodes.length === 0) return;
 
-        if (nodes.length === 0) return; // empty state handled by JSX
-
-        // Build node map for edge coloring lookups
-        const nodeMap = new Map<string, GraphNode>(nodes.map(n => [n.id, n]));
-
-        // Deep-clone node and edge arrays to avoid D3 mutating the React state
+        // Deep-clone so we don't mutate props
         const simNodes: GraphNode[] = nodes.map(n => ({ ...n }));
-        const simEdges: GraphEdge[] = edges.map(e => ({ ...e }));
+        const nodeMap = new Map<string, GraphNode>(simNodes.map(n => [n.id, n]));
+        const simEdges = edges.map(e => ({ ...e }));
 
-        // ── SVG setup ────────────────────────────────────────────────────────
+        // Pre-position nodes in a radial layout for a stable start
+        const gateway = simNodes.find(n => n.type === "gateway");
+        const endpts  = simNodes.filter(n => n.type === "endpoint");
+        if (gateway) { gateway.fx = W / 2; gateway.fy = H / 2; }
+        endpts.forEach((n, i) => {
+            const angle = (i / endpts.length) * 2 * Math.PI - Math.PI / 2;
+            const r = Math.min(W, H) * 0.32;
+            n.x = W / 2 + r * Math.cos(angle);
+            n.y = H / 2 + r * Math.sin(angle);
+        });
 
         const svg = d3.select(svgEl)
-            .attr("width", width)
-            .attr("height", height);
+            .attr("width", W)
+            .attr("height", H)
+            .style("background", "transparent");
 
-        // ── Defs ─────────────────────────────────────────────────────────────
-
+        // Grid background + arrow marker defs
         const defs = svg.append("defs");
+        const pattern = defs.append("pattern")
+            .attr("id", "grid-bg")
+            .attr("width", 40)
+            .attr("height", 40)
+            .attr("patternUnits", "userSpaceOnUse");
+        pattern.append("path")
+            .attr("d", "M 40 0 L 0 0 0 40")
+            .attr("fill", "none")
+            .attr("stroke", "#1a1a1a")
+            .attr("stroke-width", "0.5");
 
-        // Radial gradients for nodes — glassmorphism poppy palette
-        const gradients: Record<string, [string, string]> = {
-            "grad-gateway":       ["#c084fc", "#3b0764"],   // bright violet
-            "grad-zombie-crit":   ["#fb7185", "#4c0519"],   // bright rose red
-            "grad-zombie-high":   ["#fbbf24", "#451a03"],   // amber gold
-            "grad-dormant":       ["#52525b", "#18181b"],   // near-black grey
-            "grad-shadow":        ["#f472b6", "#500724"],   // hot pink
-            "grad-unknown":       ["#38bdf8", "#082f49"],   // sky cyan
-            "grad-default":       ["#4ade80", "#052e16"],   // lime green
-        };
-
-        Object.entries(gradients).forEach(([id, [c1, c2]]) => {
-            const grad = defs.append("radialGradient")
+        // Arrow markers for directed edges
+        const markerColors: [string, string][] = [
+            ["arrow-zombie-crit",  "#ff2727"],
+            ["arrow-zombie-high",  "#ff8c00"],
+            ["arrow-dormant",      "#444444"],
+            ["arrow-shadow",       "#4080ff"],
+            ["arrow-drifting",     "#f59e0b"],
+            ["arrow-orphaned",     "#c026d3"],
+            ["arrow-healthy",      "#22c55e"],
+            ["arrow-gateway",      "#a855f7"],
+            ["arrow-default",      "rgba(255,255,255,0.15)"],
+        ];
+        markerColors.forEach(([id, color]) => {
+            defs.append("marker")
                 .attr("id", id)
-                .attr("cx", "35%").attr("cy", "35%")
-                .attr("r", "65%");
-            grad.append("stop").attr("offset", "0%").attr("stop-color", c1);
-            grad.append("stop").attr("offset", "100%").attr("stop-color", c2);
+                .attr("markerWidth", 6)
+                .attr("markerHeight", 6)
+                .attr("refX", 6)
+                .attr("refY", 3)
+                .attr("orient", "auto")
+                .append("path")
+                .attr("d", "M0,0 L0,6 L6,3 z")
+                .attr("fill", color)
+                .attr("opacity", 0.8);
         });
 
-        // Glow filters — matched to poppy palette
-        ["glow-red", "glow-violet", "glow-yellow", "glow-blue", "glow-pink", "glow-green"].forEach((id) => {
-            const filter = defs.append("filter")
-                .attr("id", id)
-                .attr("x", "-50%").attr("y", "-50%")
-                .attr("width", "200%").attr("height", "200%");
-            filter.append("feGaussianBlur")
-                .attr("in", "SourceGraphic")
-                .attr("stdDeviation", "4")
-                .attr("result", "blur");
-            const merge = filter.append("feMerge");
-            merge.append("feMergeNode").attr("in", "blur");
-            merge.append("feMergeNode").attr("in", "blur");
-            merge.append("feMergeNode").attr("in", "SourceGraphic");
-        });
+        svg.append("rect").attr("width", "100%").attr("height", "100%").attr("fill", "url(#grid-bg)").attr("opacity", 0.8);
 
-        // ── Zoom/pan container ───────────────────────────────────────────────
+        // Zoom/pan layer
+        const zoomG = svg.append("g").attr("class", "zoom-root");
+        svg.call(
+            d3.zoom<SVGSVGElement, unknown>()
+                .scaleExtent([0.25, 5])
+                .on("zoom", e => zoomG.attr("transform", e.transform))
+        );
 
-        const zoomG = svg.append("g").attr("class", "zoom-container");
-
-        const zoom = d3.zoom<SVGSVGElement, unknown>()
-            .scaleExtent([0.3, 4])
-            .on("zoom", (event) => {
-                zoomG.attr("transform", event.transform);
-            });
-
-        svg.call(zoom);
-
-        // ── Links ─────────────────────────────────────────────────────────────
-
+        // Edges
         const linkG = zoomG.append("g").attr("class", "links");
-
-        const link = linkG.selectAll<SVGLineElement, GraphEdge>("line")
+        const linkSel = linkG.selectAll<SVGLineElement, typeof simEdges[0]>("line")
             .data(simEdges)
             .join("line")
             .attr("stroke-width", 1.5)
-            .attr("stroke-opacity", 0.6)
-            .attr("stroke", (d) => edgeColor(d, nodeMap));
-
-        // ── Nodes ─────────────────────────────────────────────────────────────
-
-        const nodeG = zoomG.append("g").attr("class", "nodes");
-
-        const nodeGroups = nodeG.selectAll<SVGGElement, GraphNode>("g.node-group")
-            .data(simNodes, (d) => d.id)
-            .join("g")
-            .attr("class", "node-group")
-            .style("cursor", "pointer");
-
-        // Pulse rings for zombie nodes (rendered behind the node fill)
-        nodeGroups.filter((d) => d.classification === "active_zombie")
-            .append("circle")
-            .attr("class", (d) => d.severity === "critical" ? "pulse-ring" : "pulse-ring pulse-ring--warning")
-            .attr("r", (d) => nodeRadius(d))
-            .attr("fill", "none")
-            .attr("stroke", (d) => d.severity === "critical" ? "#ef4444" : "#f97316")
-            .attr("stroke-width", 2)
-            .attr("opacity", 0.6)
-            .style("animation", (d) =>
-                d.severity === "critical"
-                    ? "zombie-pulse-critical 2s ease-out infinite"
-                    : "zombie-pulse-warning 2.5s ease-out infinite"
-            )
-            .style("transform-origin", "center")
-            .style("transform-box", "fill-box");
-
-        // Second ring for extra drama on critical
-        nodeGroups.filter((d) => d.classification === "active_zombie" && d.severity === "critical")
-            .append("circle")
-            .attr("r", (d) => nodeRadius(d))
-            .attr("fill", "none")
-            .attr("stroke", "#ef4444")
-            .attr("stroke-width", 1.5)
-            .attr("opacity", 0.4)
-            .style("animation", "zombie-pulse-critical 2s ease-out 1s infinite")
-            .style("transform-origin", "center")
-            .style("transform-box", "fill-box");
-
-        // Node fill circle
-        nodeGroups.append("circle")
-            .attr("class", "node-fill")
-            .attr("r", (d) => nodeRadius(d))
-            .attr("fill", (d) => {
-                if (d.type === "gateway") return "url(#grad-gateway)";
-                switch (d.classification) {
-                    case "active_zombie":
-                        return d.severity === "critical" ? "url(#grad-zombie-crit)" : "url(#grad-zombie-high)";
-                    case "dormant_zombie":
-                        return "url(#grad-dormant)";
-                    case "shadow":
-                        return "url(#grad-shadow)";
-                    case "unknown":
-                        return "url(#grad-unknown)";
-                    default:
-                        return "url(#grad-default)";
-                }
+            .attr("stroke-opacity", 0.9)
+            .attr("stroke-linecap", "butt")
+            .attr("stroke", d => {
+                const tid = typeof d.target === "object" ? (d.target as GraphNode).id : d.target;
+                return edgeStroke(nodeMap.get(tid) ?? null);
             })
-            .attr("stroke", (d) => nodeColor(d))
-            .attr("stroke-width", (d) => {
-                if (d.type === "gateway") return 3;
-                if (d.classification === "shadow") return 2;
-                return 1.5;
-            })
-            .attr("stroke-dasharray", (d) => d.classification === "shadow" ? "4,3" : "none")
-            .attr("filter", (d) => {
-                const gc = nodeGlowColor(d);
-                if (gc === "#fb7185") return "url(#glow-red)";
-                if (gc === "#c084fc") return "url(#glow-violet)";
-                if (gc === "#fbbf24") return "url(#glow-yellow)";
-                if (gc === "#38bdf8") return "url(#glow-blue)";
-                if (gc === "#f472b6") return "url(#glow-pink)";
-                if (gc === "#4ade80") return "url(#glow-green)";
-                return null;
+            .attr("marker-end", d => {
+                const tid = typeof d.target === "object" ? (d.target as GraphNode).id : d.target;
+                return edgeMarker(nodeMap.get(tid) ?? null);
             });
 
-        // PII badge
-        nodeGroups.filter((d) => d.is_pii && d.type !== "gateway")
-            .append("circle")
-            .attr("r", 6)
-            .attr("cx", (d) => nodeRadius(d) - 4)
-            .attr("cy", (d) => -(nodeRadius(d) - 4))
-            .attr("fill", "#ef4444")
-            .attr("stroke", "#080808")
-            .attr("stroke-width", 1.5);
+        // Node groups
+        const nodeG = zoomG.append("g").attr("class", "nodes");
+        const nodeGroups = nodeG.selectAll<SVGGElement, GraphNode>("g")
+            .data(simNodes, d => d.id)
+            .join("g")
+            .attr("class", "node")
+            .style("cursor", d => d.type === "gateway" ? "default" : "pointer");
 
-        nodeGroups.filter((d) => d.is_pii && d.type !== "gateway")
+        // Pulse rings for active zombies — inner ring
+        nodeGroups.filter(d => d.classification === "active_zombie")
+            .append("circle")
+            .attr("r", d => nodeRadius(d) + 8)
+            .attr("fill", "none")
+            .attr("stroke", d => d.severity === "critical" ? "#ff2727" : "#ff8c00")
+            .attr("stroke-width", 2)
+            .attr("opacity", 0.65)
+            .style("animation", d => `zombie-pulse ${d.severity === "critical" ? "1.6" : "2.2"}s ease-out infinite`)
+            .style("transform-origin", "center")
+            .style("transform-box", "fill-box");
+
+        // Middle ring for all active zombies
+        nodeGroups.filter(d => d.classification === "active_zombie")
+            .append("circle")
+            .attr("r", d => nodeRadius(d) + 18)
+            .attr("fill", "none")
+            .attr("stroke", d => d.severity === "critical" ? "#ff2727" : "#ff8c00")
+            .attr("stroke-width", 1.5)
+            .attr("opacity", 0.35)
+            .style("animation", d => `zombie-pulse ${d.severity === "critical" ? "1.6" : "2.2"}s ease-out 0.5s infinite`)
+            .style("transform-origin", "center")
+            .style("transform-box", "fill-box");
+
+        // Outer ring for critical only
+        nodeGroups.filter(d => d.classification === "active_zombie" && d.severity === "critical")
+            .append("circle")
+            .attr("r", d => nodeRadius(d) + 30)
+            .attr("fill", "none")
+            .attr("stroke", "#ff2727")
+            .attr("stroke-width", 1)
+            .attr("opacity", 0.18)
+            .style("animation", "zombie-pulse 1.6s ease-out 1s infinite")
+            .style("transform-origin", "center")
+            .style("transform-box", "fill-box");
+
+        // Main node circle
+        nodeGroups.append("circle")
+            .attr("class", "node-body")
+            .attr("r", d => nodeRadius(d))
+            .attr("fill", d => nodeFill(d))
+            .attr("stroke", d => nodeStroke(d))
+            .attr("stroke-width", d => nodeStrokeWidth(d))
+            .attr("stroke-dasharray", d =>
+                d.classification === "shadow"   ? "4,3" :
+                d.classification === "orphaned" ? "2,4" : "none"
+            );
+
+        // PII badge
+        nodeGroups.filter(d => d.is_pii && d.type !== "gateway")
+            .append("circle")
+            .attr("r", 5)
+            .attr("cx", d => nodeRadius(d) - 3)
+            .attr("cy", d => -(nodeRadius(d) - 3))
+            .attr("fill", "#ff2727")
+            .attr("stroke", "#080808")
+            .attr("stroke-width", 1);
+        nodeGroups.filter(d => d.is_pii && d.type !== "gateway")
             .append("text")
-            .attr("x", (d) => nodeRadius(d) - 4)
-            .attr("y", (d) => -(nodeRadius(d) - 4))
+            .attr("x", d => nodeRadius(d) - 3)
+            .attr("y", d => -(nodeRadius(d) - 3))
             .attr("text-anchor", "middle")
             .attr("dominant-baseline", "central")
             .attr("font-size", "7px")
@@ -278,216 +293,256 @@ export default function NetworkGraph({ nodes, edges, onNodeClick, selectedNodeId
             .attr("pointer-events", "none")
             .text("!");
 
-        // Node label
-        nodeGroups.append("text")
+        // "GW" text inside gateway node
+        nodeGroups.filter(d => d.type === "gateway")
+            .append("text")
             .attr("text-anchor", "middle")
             .attr("dominant-baseline", "central")
-            .attr("y", (d) => nodeRadius(d) + 13)
-            .attr("font-size", (d) => d.type === "gateway" ? "10px" : "9px")
-            .attr("font-family", "JetBrains Mono, monospace")
-            .attr("fill", (d) => d.type === "gateway" ? "#c084fc" : "#71717a")
+            .attr("font-size", "11px")
+            .attr("font-family", "'JetBrains Mono', monospace")
+            .attr("font-weight", "900")
+            .attr("fill", "#a855f7")
             .attr("pointer-events", "none")
-            .text((d) => {
-                const label = d.label || d.id;
-                return label.length > 22 ? label.slice(0, 20) + "…" : label;
+            .text("GW");
+
+        // Labels below nodes
+        nodeGroups.append("text")
+            .attr("text-anchor", "middle")
+            .attr("y", d => nodeRadius(d) + 15)
+            .attr("font-size", "10px")
+            .attr("font-family", "'JetBrains Mono', monospace")
+            .attr("fill", d => {
+                if (d.type === "gateway") return "#a855f7";
+                switch (d.classification) {
+                    case "active_zombie":  return d.severity === "critical" ? "#ff2727" : "#ff8c00";
+                    case "dormant_zombie": return "#666666";
+                    case "shadow":         return "#4080ff";
+                    case "drifting":       return "#f59e0b";
+                    case "orphaned":       return "#c026d3";
+                    default:               return "#22c55e";
+                }
+            })
+            .attr("font-weight", d => (d.classification === "active_zombie" || d.type === "gateway") ? "700" : "400")
+            .attr("pointer-events", "none")
+            .text(d => {
+                const l = d.label || d.id;
+                const parts = l.split("/").filter(Boolean);
+                return parts.length > 2 ? `…/${parts.slice(-2).join("/")}` : l.length > 24 ? l.slice(0, 22) + "…" : l;
             });
 
-        // ── Tooltip ──────────────────────────────────────────────────────────
-
-        // Use a div tooltip absolutely positioned within the container
-        let tooltipEl = containerEl.querySelector<HTMLDivElement>(".graph-tooltip");
-        if (!tooltipEl) {
-            tooltipEl = document.createElement("div");
-            tooltipEl.className = "graph-tooltip";
-            tooltipEl.style.opacity = "0";
-            tooltipEl.style.pointerEvents = "none";
-            tooltipEl.style.position = "absolute";
-            containerEl.style.position = "relative";
-            containerEl.appendChild(tooltipEl);
+        // Tooltip
+        let tip = el.querySelector<HTMLDivElement>(".ng-tooltip");
+        if (!tip) {
+            tip = document.createElement("div");
+            tip.className = "ng-tooltip";
+            tip.style.cssText = `
+                opacity:0; pointer-events:none; position:absolute; z-index:100;
+                background:#101010; border:1px solid #272727; border-radius:0;
+                padding:10px 14px; min-width:180px; max-width:240px;
+                font-family:'JetBrains Mono',monospace; font-size:11px;
+                transition:opacity 0.1s;
+            `;
+            el.style.position = "relative";
+            el.appendChild(tip);
         }
-        const tooltip = tooltipEl;
+        const tooltip = tip;
 
         nodeGroups
-            .on("mouseover", function (event: MouseEvent, d: GraphNode) {
-                const rect = containerEl.getBoundingClientRect();
-                const x = event.clientX - rect.left + 12;
-                const y = event.clientY - rect.top - 10;
-                tooltip.style.left = `${x}px`;
-                tooltip.style.top = `${y}px`;
+            .on("mouseover", function(ev: MouseEvent, d: GraphNode) {
+                const r = el.getBoundingClientRect();
+                tooltip.style.left = `${ev.clientX - r.left + 16}px`;
+                tooltip.style.top  = `${ev.clientY - r.top  - 16}px`;
                 tooltip.style.opacity = "1";
+                const clsColor = d.classification === "active_zombie"
+                    ? (d.severity === "critical" ? "#ff2727" : "#ff8c00")
+                    : d.classification === "dormant_zombie" ? "#444444"
+                    : d.classification === "shadow"   ? "#4080ff"
+                    : d.classification === "drifting" ? "#f59e0b"
+                    : d.classification === "orphaned" ? "#c026d3"
+                    : d.type === "gateway" ? "#a855f7" : "#22c55e";
                 tooltip.innerHTML = `
-                    <div class="graph-tooltip__title">${d.label || d.id}</div>
-                    <div class="graph-tooltip__row"><span>Type</span><span>${d.type}</span></div>
-                    <div class="graph-tooltip__row"><span>Class</span><span>${d.classification ?? "—"}</span></div>
-                    <div class="graph-tooltip__row"><span>Severity</span><span>${d.severity ?? "—"}</span></div>
-                    <div class="graph-tooltip__row"><span>PH Score</span><span>${d.ph_score.toFixed(2)}</span></div>
-                    <div class="graph-tooltip__row"><span>Dormant</span><span>${d.dormant ? "Yes" : "No"}</span></div>
-                    <div class="graph-tooltip__row"><span>PII</span><span>${d.is_pii ? "⚠ Yes" : "No"}</span></div>
-                    <div class="graph-tooltip__row"><span>Traffic</span><span>${d.traffic}</span></div>
+                    <div style="font-size:11px;font-weight:600;color:#f0efea;margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid #1a1a1a;font-family:'JetBrains Mono',monospace;word-break:break-all">${d.label || d.id}</div>
+                    <div style="display:flex;justify-content:space-between;gap:12px;font-size:10px;color:#444444;padding:2px 0"><span>class</span><span style="color:${clsColor}">${d.classification ?? "healthy"}</span></div>
+                    <div style="display:flex;justify-content:space-between;gap:12px;font-size:10px;color:#444444;padding:2px 0"><span>severity</span><span style="color:#888888">${d.severity ?? "—"}</span></div>
+                    <div style="display:flex;justify-content:space-between;gap:12px;font-size:10px;color:#444444;padding:2px 0"><span>ph_score</span><span style="color:#f0efea">${d.ph_score.toFixed(2)}</span></div>
+                    <div style="display:flex;justify-content:space-between;gap:12px;font-size:10px;color:#444444;padding:2px 0"><span>traffic</span><span style="color:#f0efea">${d.traffic} req</span></div>
+                    ${d.is_pii ? '<div style="display:flex;justify-content:space-between;gap:12px;font-size:10px;padding:2px 0"><span style="color:#444444">pii</span><span style="color:#ff2727">EXPOSED</span></div>' : ""}
+                    ${d.dormant ? '<div style="display:flex;justify-content:space-between;gap:12px;font-size:10px;padding:2px 0"><span style="color:#444444">status</span><span style="color:#888888">DORMANT</span></div>' : ""}
                 `;
-                // Highlight hovered node — target the fill circle specifically (not the pulse ring)
-                d3.select(this).select("circle.node-fill").attr("stroke-width", 3);
+                d3.select(this).select("circle.node-body").attr("stroke-width", d.type === "gateway" ? 3 : 2);
             })
-            .on("mousemove", function (event: MouseEvent) {
-                const rect = containerEl.getBoundingClientRect();
-                tooltip.style.left = `${event.clientX - rect.left + 12}px`;
-                tooltip.style.top = `${event.clientY - rect.top - 10}px`;
+            .on("mousemove", function(ev: MouseEvent) {
+                const r = el.getBoundingClientRect();
+                let x = ev.clientX - r.left + 16;
+                let y = ev.clientY - r.top  - 16;
+                if (x + 250 > r.width) x = ev.clientX - r.left - 256;
+                tooltip.style.left = `${x}px`;
+                tooltip.style.top  = `${y}px`;
             })
-            .on("mouseout", function (_event: MouseEvent, d: GraphNode) {
+            .on("mouseout", function(_: MouseEvent, d: GraphNode) {
                 tooltip.style.opacity = "0";
-                d3.select(this).select("circle.node-fill").attr("stroke-width", () => {
-                    if (d.type === "gateway") return 3;
-                    if (d.classification === "shadow") return 2;
-                    return 1.5;
-                });
+                d3.select(this).select("circle.node-body").attr("stroke-width", nodeStrokeWidth(d));
             })
-            .on("click", function (_event: MouseEvent, d: GraphNode) {
-                onNodeClickRef.current(d);
+            .on("click", function(_: MouseEvent, d: GraphNode) {
+                if (d.type !== "gateway") onClickRef.current(d);
             });
 
-        // ── Selected node highlight ──────────────────────────────────────────
-
-        function updateSelection() {
-            nodeGroups.selectAll<SVGCircleElement, GraphNode>("circle.selection-ring").remove();
-            if (!selectedNodeIdRef.current) return;
-            nodeGroups.filter((d) => d.id === selectedNodeIdRef.current)
+        // Selection ring
+        const applySelection = () => {
+            nodeGroups.selectAll("circle.sel-ring").remove();
+            if (!selectedRef.current) return;
+            nodeGroups.filter(d => d.id === selectedRef.current)
                 .append("circle")
-                .attr("class", "selection-ring")
-                .attr("r", (d) => nodeRadius(d) + 6)
+                .attr("class", "sel-ring")
+                .attr("r", d => nodeRadius(d) + 9)
                 .attr("fill", "none")
-                .attr("stroke", "#c084fc")
-                .attr("stroke-width", 2)
-                .attr("stroke-dasharray", "4,2")
+                .attr("stroke", "#c8ff47")
+                .attr("stroke-width", 1.5)
+                .attr("stroke-dasharray", "6,3")
                 .attr("opacity", 0.9);
-        }
-
-        updateSelection();
-
-        // ── Drag ─────────────────────────────────────────────────────────────
-
-        const drag = d3.drag<SVGGElement, GraphNode>()
-            .on("start", (event, d) => {
-                if (!event.active && simulationRef.current) {
-                    simulationRef.current.alphaTarget(0.3).restart();
-                }
-                d.fx = d.x;
-                d.fy = d.y;
-            })
-            .on("drag", (event, d) => {
-                d.fx = event.x;
-                d.fy = event.y;
-            })
-            .on("end", (event, d) => {
-                if (!event.active && simulationRef.current) {
-                    simulationRef.current.alphaTarget(0);
-                }
-                d.fx = null;
-                d.fy = null;
-            });
-
-        nodeGroups.call(drag);
-
-        // ── Simulation ───────────────────────────────────────────────────────
-
-        const simulation = d3.forceSimulation<GraphNode>(simNodes)
-            .force(
-                "link",
-                d3.forceLink<GraphNode, GraphEdge>(simEdges)
-                    .id((d) => d.id)
-                    .distance(90)
-                    .strength(0.8)
-            )
-            .force("charge", d3.forceManyBody<GraphNode>().strength(-250))
-            .force("center", d3.forceCenter(width / 2, height / 2))
-            .force("collide", d3.forceCollide<GraphNode>().radius((d) => nodeRadius(d) + 14))
-            .force("x", d3.forceX<GraphNode>(width / 2).strength(0.05))
-            .force("y", d3.forceY<GraphNode>(height / 2).strength(0.05));
-
-        simulationRef.current = simulation;
-
-        const linkCoord = (n: string | number | GraphNode, axis: "x" | "y"): number => {
-            if (typeof n === "object" && n !== null) return (n[axis] as number | undefined) ?? 0;
-            return 0;
         };
+        applySelection();
 
-        simulation.on("tick", () => {
-            link
-                .attr("x1", (d) => linkCoord(d.source, "x"))
-                .attr("y1", (d) => linkCoord(d.source, "y"))
-                .attr("x2", (d) => linkCoord(d.target, "x"))
-                .attr("y2", (d) => linkCoord(d.target, "y"));
+        // Drag
+        nodeGroups.call(
+            d3.drag<SVGGElement, GraphNode>()
+                .on("start", (ev, d) => {
+                    if (!ev.active && simRef.current) simRef.current.alphaTarget(0.3).restart();
+                    d.fx = d.x; d.fy = d.y;
+                })
+                .on("drag",  (ev, d) => { d.fx = ev.x; d.fy = ev.y; })
+                .on("end",   (ev, d) => {
+                    if (!ev.active && simRef.current) simRef.current.alphaTarget(0);
+                    if (d.type !== "gateway") { d.fx = null; d.fy = null; }
+                })
+        );
 
-            nodeGroups.attr("transform", (d) => `translate(${d.x ?? 0},${d.y ?? 0})`);
+        // Force simulation
+        const sim = d3.forceSimulation<GraphNode>(simNodes)
+            .force("link",    d3.forceLink<GraphNode, GraphEdge>(simEdges).id(d => d.id).distance(100).strength(0.7))
+            .force("charge",  d3.forceManyBody<GraphNode>().strength(-320).distanceMax(400))
+            .force("collide", d3.forceCollide<GraphNode>().radius(d => nodeRadius(d) + 18).strength(0.9))
+            .force("x",       d3.forceX<GraphNode>(W / 2).strength(0.04))
+            .force("y",       d3.forceY<GraphNode>(H / 2).strength(0.04))
+            .alpha(0.8)
+            .alphaDecay(0.025);
+
+        simRef.current = sim;
+
+        sim.on("tick", () => {
+            linkSel.each(function(d) {
+                const src = d.source as unknown as GraphNode;
+                const tgt = d.target as unknown as GraphNode;
+                const sx = src.x ?? 0, sy = src.y ?? 0;
+                const tx = tgt.x ?? 0, ty = tgt.y ?? 0;
+                const dx = tx - sx, dy = ty - sy;
+                const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+                // Shorten line by target radius + arrow head offset so marker sits on node edge
+                const tr = nodeRadius(tgt) + 8;
+                const sr = nodeRadius(src) + 2;
+                d3.select(this)
+                    .attr("x1", sx + (dx / dist) * sr)
+                    .attr("y1", sy + (dy / dist) * sr)
+                    .attr("x2", tx - (dx / dist) * tr)
+                    .attr("y2", ty - (dy / dist) * tr);
+            });
+            nodeGroups.attr("transform", d => `translate(${d.x ?? 0},${d.y ?? 0})`);
         });
 
-        // Re-apply selection ring whenever selectedNodeId updates
-        // This is called by the parent re-render so we rely on useEffect deps
+    }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-    }, [nodes, edges]); // eslint-disable-line react-hooks/exhaustive-deps
-
-    // Rebuild when nodes/edges change
+    // ── Main rebuild effect ─────────────────────────────────────────────────────
+    // Computes a lightweight content digest and only triggers a full D3 rebuild
+    // when node or edge data actually changes. This prevents the simulation from
+    // restarting on every 5-second poll when the API returns identical data
+    // (which always produces new array references via useMemo in the parent).
     useEffect(() => {
-        buildGraph();
-        return () => {
-            if (simulationRef.current) {
-                simulationRef.current.stop();
-                simulationRef.current = null;
-            }
-        };
-    }, [buildGraph]);
+        const digest =
+            nodes.map(n =>
+                `${n.id}:${n.classification ?? ""}:${n.severity ?? ""}:${n.is_pii ? 1 : 0}:${Math.round(n.ph_score * 10)}:${n.dormant ? 1 : 0}:${n.traffic}`
+            ).join("|")
+            + ">"
+            + edges.map(e => `${e.source}->${e.target}`).join(",");
 
-    // Update selection ring without rebuilding the whole graph
+        if (digest === digestRef.current) return; // data unchanged — keep simulation running
+        digestRef.current = digest;
+        buildGraph();
+        return () => { if (simRef.current) { simRef.current.stop(); simRef.current = null; } };
+    }, [nodes, edges, buildGraph]);
+
+    // ── Selection ring update — no full rebuild needed ──────────────────────────
     useEffect(() => {
         const svgEl = svgRef.current;
         if (!svgEl) return;
-        const svg = d3.select(svgEl);
-        svg.selectAll<SVGCircleElement, GraphNode>("circle.selection-ring").remove();
+        const s = d3.select(svgEl);
+        s.selectAll("circle.sel-ring").remove();
         if (selectedNodeId) {
-            svg.selectAll<SVGGElement, GraphNode>("g.node-group")
-                .filter((d) => d.id === selectedNodeId)
+            s.selectAll<SVGGElement, GraphNode>("g.node")
+                .filter(d => d.id === selectedNodeId)
                 .append("circle")
-                .attr("class", "selection-ring")
-                .attr("r", (d) => nodeRadius(d) + 6)
+                .attr("class", "sel-ring")
+                .attr("r", d => nodeRadius(d) + 9)
                 .attr("fill", "none")
-                .attr("stroke", "#c084fc")
-                .attr("stroke-width", 2)
-                .attr("stroke-dasharray", "4,2")
+                .attr("stroke", "#c8ff47")
+                .attr("stroke-width", 1.5)
+                .attr("stroke-dasharray", "6,3")
                 .attr("opacity", 0.9);
         }
     }, [selectedNodeId]);
 
-    // ResizeObserver to rebuild on container size change
+    // ── Rebuild on container resize ─────────────────────────────────────────────
     useEffect(() => {
         const el = containerRef.current;
         if (!el) return;
-        const observer = new ResizeObserver(() => {
-            buildGraph();
-        });
-        observer.observe(el);
-        return () => observer.disconnect();
+        // Clear digest on resize so the next rebuild uses fresh dimensions
+        const obs = new ResizeObserver(() => { digestRef.current = ""; buildGraph(); });
+        obs.observe(el);
+        return () => obs.disconnect();
     }, [buildGraph]);
 
-    if (nodes.length === 0) {
-        return (
-            <div ref={containerRef} style={{ flex: 1, minHeight: 420, display: "flex", alignItems: "center", justifyContent: "center" }}>
-                <div className="graph-empty">
-                    <div className="graph-empty__icon">
-                        <svg width="24" height="24" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M9 3H5a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2V5a2 2 0 00-2-2h-4M9 3a2 2 0 002 2h2a2 2 0 002-2M9 3a2 2 0 012-2h2a2 2 0 012 2" />
-                        </svg>
-                    </div>
-                    <span>Waiting for sensor data…</span>
-                </div>
-            </div>
-        );
+    const isEmpty = nodes.length === 0;
+
+    function handleReset() {
+        digestRef.current = "";
+        buildGraph();
     }
 
     return (
-        <div ref={containerRef} style={{ flex: 1, minHeight: 420, width: "100%", position: "relative" }}>
-            <svg
-                ref={svgRef}
-                style={{ display: "block", width: "100%", height: "100%", minHeight: 420 }}
-            />
+        <div ref={containerRef} style={{ flex: 1, width: "100%", height: "100%", minHeight: 420, position: "relative", background: "#080808" }}>
+            {!isEmpty && (
+                <button
+                    onClick={handleReset}
+                    title="Reset graph layout"
+                    style={{
+                        position: "absolute", top: 8, right: 8, zIndex: 10,
+                        background: "rgba(8,8,8,0.85)", border: "1px solid #272727",
+                        color: "#555555", fontSize: "13px", lineHeight: 1,
+                        padding: "4px 7px", cursor: "pointer", fontFamily: "monospace",
+                        transition: "color 0.12s, border-color 0.12s",
+                    }}
+                    onMouseEnter={e => { const b = e.currentTarget; b.style.color = "#f0efea"; b.style.borderColor = "#555"; }}
+                    onMouseLeave={e => { const b = e.currentTarget; b.style.color = "#555555"; b.style.borderColor = "#272727"; }}
+                >
+                    ↺
+                </button>
+            )}
+            {isEmpty ? (
+                <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "12px" }}>
+                    <svg style={{ position: "absolute", inset: 0, opacity: 0.4, pointerEvents: "none" }} width="100%" height="100%">
+                        <defs>
+                            <pattern id="grid-empty" width="40" height="40" patternUnits="userSpaceOnUse">
+                                <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1a1a1a" strokeWidth="0.5" />
+                            </pattern>
+                        </defs>
+                        <rect width="100%" height="100%" fill="url(#grid-empty)" />
+                    </svg>
+                    <span style={{ position: "relative", zIndex: 1, fontFamily: "'JetBrains Mono', monospace", fontSize: "12px", color: "#444444" }}>
+                        // awaiting sensor data
+                    </span>
+                </div>
+            ) : (
+                <svg ref={svgRef} style={{ width: "100%", height: "100%", display: "block" }} />
+            )}
         </div>
     );
 }

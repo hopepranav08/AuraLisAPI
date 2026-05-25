@@ -11,10 +11,18 @@ import (
 
 // Config holds runtime configuration for the sensor.
 type Config struct {
-	Mode        string // "live" | "mock"
-	RedisAddr   string
-	RedisStream string
-	FixturesDir string
+	Mode          string // "live" | "mock"
+	RedisAddr     string
+	RedisPassword string // empty = no auth (development default)
+	RedisStream   string
+	FixturesDir   string
+
+	// Remote brain connection (company install mode).
+	// When BrainURL is set the sensor registers itself and forwards events
+	// to the hosted brain via HTTP in addition to local Redis.
+	BrainURL     string // e.g. "https://auralisapi.dev"
+	CompanyToken string // Bearer token issued at onboarding
+	SensorID     string // auto-generated from hostname if empty
 }
 
 // Sensor is the interface both modes implement.

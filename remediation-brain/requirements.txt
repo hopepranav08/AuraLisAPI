@@ -8,7 +8,8 @@ uvicorn[standard]==0.32.1
 # ── LangGraph / LangChain ─────────────────────────────────────────────────────
 langgraph==0.2.60
 langchain-core==0.3.35
-langchain-groq==0.2.4
+langchain-groq==0.2.4        # kept for fallback compat
+langchain-anthropic==0.3.7   # primary LLM: claude-haiku-4-5
 
 # LangGraph PostgreSQL checkpointer — separate package from langgraph core.
 # Provides AsyncPostgresSaver used in agent/graph.py.
@@ -31,6 +32,10 @@ pydantic-settings==2.7.0
 frouros==0.9.0
 scikit-learn==1.6.0
 numpy==2.1.3
+
+# ── Security: JWT auth + rate limiting ───────────────────────────────────────
+python-jose[cryptography]==3.3.0   # JWT encode/decode (auth.py)
+slowapi==0.1.9                     # rate limiting on /sensor/ingest and /remediate
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
 httpx==0.28.1

@@ -35,7 +35,7 @@ LOG_LEVEL   ?= info
 # ── First-time setup ──────────────────────────────────────────────────────────
 
 setup:
-	@python -c "import os, shutil; shutil.copy('.env.example', '.env') if not os.path.exists('.env') else print('[setup] .env already exists — skipping copy')"
+	@python3 -c "import os, shutil; shutil.copy('.env.example', '.env') if not os.path.exists('.env') else print('[setup] .env already exists — skipping copy')"
 	@echo "[setup] .env ready. Fill in GROQ_API_KEY and GITHUB_TOKEN before running make up."
 
 # ── Build ─────────────────────────────────────────────────────────────────────
@@ -49,7 +49,7 @@ build:
 start: build up
 
 up:
-	@python -c "import os,sys; sys.exit('[error] .env not found — run: make setup') if not os.path.exists('.env') else None"
+	@python3 -c "import os,sys; sys.exit('[error] .env not found — run: make setup') if not os.path.exists('.env') else None"
 	$(COMPOSE) up -d
 	@echo ""
 	@echo "  AuralisAPI is running (SENSOR_MODE=$(SENSOR_MODE))"
@@ -65,7 +65,7 @@ up:
 	@echo ""
 
 up-live:
-	@python -c "import os,sys; sys.exit('[error] .env not found — run: make setup') if not os.path.exists('.env') else None"
+	@python3 -c "import os,sys; sys.exit('[error] .env not found — run: make setup') if not os.path.exists('.env') else None"
 	@echo "[WARNING] SENSOR_MODE=live — eBPF programs will attempt kernel injection."
 	@echo "[WARNING] Requires Linux host with kernel >= 5.8 and CAP_BPF."
 	$(COMPOSE) up -d

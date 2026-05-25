@@ -87,10 +87,13 @@ static __always_inline int emit_request_event(__u32 pid, __u32 tid,
     if (!evt)
         return -1;
 
+    // bpf_ringbuf_reserve does NOT zero the memory. Zero the entire slot so
+    // that any path bytes not written by extract_path remain NUL, not garbage.
+    __builtin_memset(evt, 0, sizeof(*evt));
+
     evt->pid          = pid;
     evt->tid          = tid;
     evt->timestamp_ns = bpf_ktime_get_ns();
-    evt->status_code  = 0;
     evt->source       = source;
     evt->direction    = direction;
     __builtin_memcpy(evt->method, method_buf, MAX_METHOD_LEN);

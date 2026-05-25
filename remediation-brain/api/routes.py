@@ -17,16 +17,34 @@
 #   GET  /honeypot/events              — read recent honeypot hits from Redis stream
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import re
+import time as _time
 import uuid
 from typing import Any, Optional
 
-import httpx
-import redis.asyncio as aioredis
-import structlog
-from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+import httpx  # type: ignore[import]
+import redis.asyncio as aioredis  # type: ignore[import]
+import structlog  # type: ignore[import]
+from fastapi import APIRouter, Depends, HTTPException, Request, status  # type: ignore[import]
+from pydantic import BaseModel  # type: ignore[import]
+from slowapi import Limiter  # type: ignore[import]
+from slowapi.util import get_remote_address  # type: ignore[import]
+
+from api.auth import require_auth
+
+_limiter = Limiter(key_func=get_remote_address)
+
+_VALID_HTTP_METHODS = frozenset({"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"})
+_IP_RE = re.compile(
+    r"^("
+    r"(\d{1,3}\.){3}\d{1,3}"          # IPv4
+    r"|([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}"  # IPv6 (simplified)
+    r"|unknown"
+    r")$"
+)
 
 try:
     from enforcement.krakend_mutator import mutate_krakend, read_gateway_state
@@ -36,8 +54,27 @@ except ImportError:
     read_gateway_state = None  # type: ignore[assignment]
     _MUTATOR_AVAILABLE = False
 
+try:
+    from agent.nodes import _fetch_openapi_spec, _extract_spec_paths
+    _SPEC_AVAILABLE = True
+except ImportError:
+    _fetch_openapi_spec = None  # type: ignore[assignment]
+    _extract_spec_paths = None  # type: ignore[assignment]
+    _SPEC_AVAILABLE = False
+
 log = structlog.get_logger(__name__)
 router = APIRouter()
+
+
+def _redis_url() -> str:
+    """Build the Redis URL, including password when REDIS_PASSWORD env var is set."""
+    password = os.getenv("REDIS_PASSWORD", "")
+    host     = os.getenv("REDIS_HOST", "redis:6379")
+    base     = os.getenv("REDIS_URL", f"redis://{host}")
+    if password and ":" not in base.split("@")[0].split("//")[-1]:
+        # Inject password: redis://host → redis://:password@host
+        base = base.replace("redis://", f"redis://:{password}@", 1)
+    return base
 
 
 # ── Health ────────────────────────────────────────────────────────────────────
@@ -47,10 +84,129 @@ async def health_check():
     return {"status": "ok", "service": "remediation-brain"}
 
 
+# ── Gone stub ─────────────────────────────────────────────────────────────────
+# KrakenD 2.7 CE's proxy/static requires a 2xx from the backend to apply its
+# static override. A 4xx backend response causes KrakenD to emit 500 instead.
+# This stub returns 200; proxy/static overlays the "Gone" body. The resulting
+# client response carries the static JSON but with a 200 status — a known
+# KrakenD CE limitation. The brain's direct krakend_mutator injects real 410
+# blocks for quarantined endpoints via a separate mechanism.
+@router.get("/gone", tags=["System"])
+@router.post("/gone", tags=["System"])
+async def gone_stub():
+    return {"status": "gone", "code": 410}
+
+
+# ── Drift Stats Proxy ─────────────────────────────────────────────────────────
+# The eBPF sensor (network_mode: host) exposes /drift/stats on port 9090.
+# On Docker Desktop for Windows, host.docker.internal resolves to the Hyper-V
+# VM gateway IP — not the Linux VM loopback — so bridge-network containers
+# cannot reach the sensor directly. This proxy endpoint runs inside the brain
+# container (bridge network) which also cannot reach the host network, BUT the
+# sensor's port 9090 is published to the Docker host via host networking.
+# We attempt to reach the sensor at SENSOR_METRICS_URL (default: host.docker.internal:9090)
+# and fall back to an empty list when unavailable (graceful degradation).
+
+SENSOR_URL = os.getenv("SENSOR_METRICS_URL", "http://host.docker.internal:9090")
+
+# How many seconds of stream history to scan for per-endpoint counts.
+_DRIFT_WINDOW_SECS = 60
+
+
+@router.get("/drift/stats", tags=["Drift"])
+async def proxy_drift_stats():
+    """
+    Serve per-endpoint drift stats.
+
+    Strategy (in priority order):
+    1. Try the eBPF sensor's HTTP endpoint (real PH scores, zero-latency).
+    2. Fall back to scanning the Redis stream for the last 60 seconds of
+       ingress events and computing a simple per-endpoint request count
+       (no PH score — ph_score is set to current_window as a proxy).
+
+    This ensures the dashboard always shows real traffic data even when
+    the sensor's HTTP port is unreachable from the bridge network.
+    """
+    # ── Strategy 1: Sensor HTTP (preferred) ───────────────────────────────────
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(2.0)) as client:
+            resp = await client.get(f"{SENSOR_URL}/drift/stats")
+            if resp.status_code == 200:
+                data = resp.json()
+                if data:  # non-empty — sensor is serving real data
+                    return data
+    except Exception:
+        pass  # fall through to Redis strategy
+
+    # ── Strategy 2: Redis stream scan ─────────────────────────────────────────
+    # Read recent stream entries and count ingress events per endpoint.
+    redis_url = os.getenv("REDIS_URL", "redis://redis:6379")
+    stream    = os.getenv("REDIS_STREAM", "auralis:events")
+
+    import redis.asyncio as aioredis  # type: ignore[import]
+    import time as _t
+
+    cutoff_ms = int((_t.time() - _DRIFT_WINDOW_SECS) * 1000)
+    # Redis stream IDs are "<ms>-<seq>" — build a minimum ID from the cutoff.
+    min_id = f"{cutoff_ms}-0"
+
+    counts: dict[str, int] = {}
+    try:
+        client = aioredis.from_url(redis_url, decode_responses=True)
+        async with client:
+            entries = await client.xrange(stream, min=min_id, max="+", count=500)
+            for _eid, fields in entries:
+                raw = fields.get("data", "")
+                try:
+                    payload = json.loads(raw)
+                except Exception:
+                    continue
+                # Only count ingress events (traffic inbound to the API).
+                if payload.get("direction") != "ingress":
+                    continue
+                path = payload.get("path", "")
+                if path:
+                    counts[path] = counts.get(path, 0) + 1
+    except Exception as exc:
+        log.warning("drift stats: redis scan failed", error=str(exc))
+        return []
+
+    # Build EndpointStats-shaped response compatible with the UI.
+    now_ns = int(_t.time() * 1e9)
+    return [
+        {
+            "endpoint":        path,
+            "current_window":  count,
+            "running_mean":    round(count / 6, 3),  # rough: 60s / 10s_window = 6 ticks
+            "ph_score":        round(count / 2, 3),  # proxy score — not real PH
+            "dormant":         count == 0,
+            "dormant_windows": 0,
+            "total_observations": 1,
+            "source":          "redis_stream",        # signals UI this is not real PH
+            "timestamp_ns":    now_ns,
+        }
+        for path, count in sorted(counts.items(), key=lambda x: -x[1])
+    ]
+
+
+@router.get("/drift/health", tags=["Drift"])
+async def proxy_drift_health():
+    """Proxy /drift/health from the eBPF sensor."""
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(3.0)) as client:
+            resp = await client.get(f"{SENSOR_URL}/health")
+            if resp.status_code == 200:
+                return resp.json()
+    except Exception as exc:
+        log.warning("drift health proxy: sensor unreachable", url=SENSOR_URL, error=str(exc))
+    return {"status": "unavailable", "sensor_url": SENSOR_URL}
+
+
+
 # ── Incidents ─────────────────────────────────────────────────────────────────
 
 @router.get("/incidents", tags=["Incidents"])
-async def list_incidents(request: Request, limit: int = 50):
+async def list_incidents(request: Request, limit: int = 50, deduplicate: bool = True):
     """
     List recent incidents from the LangGraph checkpoint store.
 
@@ -64,19 +220,16 @@ async def list_incidents(request: Request, limit: int = 50):
 
     incidents: list[dict[str, Any]] = []
     try:
-        # LangGraph CompiledGraph exposes aget_state_history on the checkpointer.
-        # We iterate over all stored thread checkpoints.
-        async for config, metadata in _iter_checkpoints(graph, limit=limit):
-            thread_id = config.get("configurable", {}).get("thread_id", "unknown")
-
-            # Get the latest state for this thread.
-            state_snapshot = await graph.aget_state(config)
-            if state_snapshot is None:
-                continue
-
-            values = state_snapshot.values or {}
-            next_nodes = list(state_snapshot.next or [])
-            is_waiting = "enforce" in next_nodes  # interrupted before enforce
+        # Use _iter_states_fast: reads channel_values directly from CheckpointTuple,
+        # avoiding one aget_state() DB round-trip per thread (N+1 → O(1) queries).
+        async for thread_id, values in _iter_states_fast(graph, limit=limit):
+            # Infer awaiting_approval without aget_state():
+            #   plan ran (planned_actions set) + enforce not yet run (no executed_actions)
+            #   + report not yet generated + routing condition: severity critical/high
+            severity   = (values.get("severity") or "").lower()
+            has_plan   = bool(values.get("planned_actions"))
+            has_report = bool(values.get("report"))
+            is_waiting = has_plan and not has_report and severity in ("critical", "high")
 
             raw_report = values.get("report")
             report_summary: dict[str, Any] | None = None
@@ -94,16 +247,34 @@ async def list_incidents(request: Request, limit: int = 50):
                 "severity":       values.get("severity"),
                 "is_pii_exposed": values.get("is_pii_exposed", False),
                 "status":         "awaiting_approval" if is_waiting else "completed",
-                "next":           next_nodes,
+                "next":           ["enforce"] if is_waiting else [],
                 "github_pr_url":  values.get("github_pr_url"),
                 "report_summary": report_summary,
             })
     except Exception as exc:
         log.warning("incident listing failed", error=str(exc))
-        # Return empty list rather than 500 — checkpointer may be empty on first boot.
         return {"incidents": [], "total": 0, "error": str(exc)}
 
-    return {"incidents": incidents, "total": len(incidents)}
+    if not deduplicate:
+        return {"incidents": incidents, "total": len(incidents)}
+
+    # ── Deduplication: keep one incident per endpoint ─────────────────────────
+    # Priority: awaiting_approval > completed (most recent wins within same status).
+    seen: dict = {}
+    for inc in incidents:
+        ep = inc["endpoint"]
+        if ep not in seen:
+            seen[ep] = inc
+        elif inc["status"] == "awaiting_approval" and seen[ep]["status"] != "awaiting_approval":
+            seen[ep] = inc
+
+    deduped = list(seen.values())
+    sev_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, None: 4}
+    deduped.sort(key=lambda i: (
+        0 if i["status"] == "awaiting_approval" else 1,
+        sev_order.get(i["severity"], 4),
+    ))
+    return {"incidents": deduped, "total": len(deduped)}
 
 
 @router.get("/incidents/{thread_id}", tags=["Incidents"])
@@ -156,7 +327,7 @@ class ApprovalRequest(BaseModel):
 
 
 @router.post("/incidents/{thread_id}/approve", tags=["Incidents"])
-async def approve_incident(thread_id: str, request: Request, body: ApprovalRequest = ApprovalRequest()):
+async def approve_incident(thread_id: str, request: Request, body: ApprovalRequest = ApprovalRequest(), _user: str = Depends(require_auth)):
     """
     Resume the LangGraph graph past the enforce interrupt (human approval).
 
@@ -216,7 +387,7 @@ async def approve_incident(thread_id: str, request: Request, body: ApprovalReque
 
 
 @router.post("/incidents/{thread_id}/reject", tags=["Incidents"])
-async def reject_incident(thread_id: str, request: Request, body: ApprovalRequest = ApprovalRequest()):
+async def reject_incident(thread_id: str, request: Request, body: ApprovalRequest = ApprovalRequest(), _user: str = Depends(require_auth)):
     """
     Reject enforcement — skip the enforce node and route directly to report.
 
@@ -251,9 +422,12 @@ async def reject_incident(thread_id: str, request: Request, body: ApprovalReques
         {
             "enforcement_approved": False,
             "human_notes":          [f"[rejected] {rejection_note}"],
+            "executed_actions":     [f"[rejected] No enforcement actions taken — {rejection_note}"],
         },
-        # Force the graph to jump to generate_report instead of enforce.
-        as_node="plan",
+        # as_node="enforce" tells LangGraph this update came from the enforce node,
+        # so the graph's next pointer moves to ["generate_report"] instead of
+        # re-evaluating should_enforce (which would route back to enforce again).
+        as_node="enforce",
     )
 
     try:
@@ -280,7 +454,8 @@ class RemediateRequest(BaseModel):
 
 
 @router.post("/remediate", tags=["Remediation"])
-async def trigger_remediation(req: RemediateRequest, request: Request):
+@_limiter.limit("10/minute")
+async def trigger_remediation(req: RemediateRequest, request: Request, _user: str = Depends(require_auth)):
     """
     Manually trigger the LangGraph remediation workflow for a given API path.
     Returns a thread_id for async polling via GET /incidents/{thread_id}.
@@ -309,11 +484,16 @@ async def trigger_remediation(req: RemediateRequest, request: Request):
         "severity":            None,
     }
 
-    try:
-        await graph.ainvoke(initial_state, config=config)
-    except Exception as exc:
-        log.error("manual remediation failed", path=req.path, error=str(exc))
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    # Fire-and-forget: return thread_id immediately so KrakenD doesn't timeout.
+    # The full LangGraph workflow (LLM calls + checkpointing) can take 30-60s;
+    # the client polls GET /incidents/{thread_id} for the result.
+    async def _run():
+        try:
+            await graph.ainvoke(initial_state, config=config)
+        except Exception as exc:
+            log.error("manual remediation failed", path=req.path, error=str(exc))
+
+    asyncio.create_task(_run())
 
     return {
         "status":     "queued",
@@ -337,16 +517,12 @@ async def get_inventory(request: Request):
         return {"endpoints": [], "total": 0, "zombies": 0, "shadows": 0}
 
     endpoints: list[dict[str, Any]] = []
-    zombies, shadows = 0, 0
+    zombies, shadows, orphaned = 0, 0, 0
 
     try:
-        async for config, _ in _iter_checkpoints(graph, limit=200):
-            snapshot = await graph.aget_state(config)
-            if snapshot is None:
-                continue
-            values = snapshot.values or {}
-            cls    = values.get("classification")
-            path   = (values.get("raw_event") or {}).get("path", "unknown")
+        async for _, values in _iter_states_fast(graph, limit=200):
+            cls  = values.get("classification")
+            path = (values.get("raw_event") or {}).get("path", "unknown")
             if not path or path == "unknown":
                 continue
             if cls in ("active_zombie", "dormant_zombie"):
@@ -362,7 +538,35 @@ async def get_inventory(request: Request):
     except Exception as exc:
         log.warning("inventory aggregation failed", error=str(exc))
 
-    return {"endpoints": endpoints, "total": len(endpoints), "zombies": zombies, "shadows": shadows}
+    # Orphaned detection: spec-documented paths that have never appeared in traffic.
+    # Hard 10s timeout so a slow GitHub API call never blocks the inventory response.
+    if _SPEC_AVAILABLE and _fetch_openapi_spec is not None and _extract_spec_paths is not None:
+        _fos, _esp = _fetch_openapi_spec, _extract_spec_paths
+        try:
+            spec = await asyncio.wait_for(asyncio.to_thread(_fos), timeout=10.0)
+            spec_paths = _esp(spec) if spec else {}
+            seen = {ep["path"] for ep in endpoints}
+            for spec_path in spec_paths:
+                if spec_path not in seen:
+                    orphaned += 1
+                    endpoints.append({
+                        "path":           spec_path,
+                        "classification": "orphaned",
+                        "severity":       "low",
+                        "is_pii_exposed": False,
+                    })
+        except asyncio.TimeoutError:
+            log.warning("orphaned detection timed out — skipping")
+        except Exception as exc:
+            log.warning("orphaned detection failed", error=str(exc))
+
+    return {
+        "endpoints": endpoints,
+        "total":     len(endpoints),
+        "zombies":   zombies,
+        "shadows":   shadows,
+        "orphaned":  orphaned,
+    }
 
 
 # ── Phase 4: Gateway config inspection ────────────────────────────────────────
@@ -376,9 +580,12 @@ async def get_gateway_config():
     This reflects any mutations made by enforce_node without waiting for a
     PR to be reviewed and merged.
     """
-    if not _MUTATOR_AVAILABLE:
+    if not _MUTATOR_AVAILABLE or read_gateway_state is None:
         raise HTTPException(status_code=503, detail="Enforcement module unavailable")
-    state = read_gateway_state()
+    # read_gateway_state() does file I/O — run in thread pool to avoid blocking
+    # the asyncio event loop.
+    _rgs = read_gateway_state
+    state = await asyncio.to_thread(_rgs)
     return {
         "config_path":         os.getenv("KRAKEND_CONFIG_PATH", "/app/krakend.json"),
         "total_endpoints":     state["total"],
@@ -394,14 +601,14 @@ async def get_gateway_config():
 # ── Phase 4: Internal quarantine trigger ──────────────────────────────────────
 
 class QuarantineRequest(BaseModel):
-    path:        str
-    incident_id: str = ""
-    schema:      dict = {}    # JSON schema for honeypot fake-data generation
-    severity:    str = "high"
+    path:            str
+    incident_id:     str  = ""
+    response_schema: dict = {}    # JSON schema for honeypot fake-data generation
+    severity:        str  = "high"
 
 
 @router.post("/gateway/quarantine", tags=["Gateway"])
-async def trigger_quarantine(body: QuarantineRequest):
+async def trigger_quarantine(body: QuarantineRequest, _user: str = Depends(require_auth)):
     """
     Trigger an immediate local quarantine: mutate krakend.json AND register
     the path with the dynamic honeypot server.
@@ -410,13 +617,14 @@ async def trigger_quarantine(body: QuarantineRequest):
     directly from the dashboard or CI pipelines for manual quarantine actions.
     Idempotent — calling twice for the same path is safe.
     """
-    if not _MUTATOR_AVAILABLE:
+    if not _MUTATOR_AVAILABLE or mutate_krakend is None:
         raise HTTPException(status_code=503, detail="Enforcement module unavailable")
 
     incident_id = body.incident_id or str(uuid.uuid4())
 
-    # 1. Mutate local krakend.json
-    mutation = mutate_krakend(body.path, incident_id)
+    # 1. Mutate local krakend.json (synchronous file I/O — run in thread pool)
+    _mk = mutate_krakend
+    mutation = await asyncio.to_thread(_mk, body.path, incident_id)
 
     # 2. Register with honeypot server (best-effort)
     honeypot_status = "skipped"
@@ -424,7 +632,7 @@ async def trigger_quarantine(body: QuarantineRequest):
         async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
             resp = await client.post(
                 "http://honeypot-decoy:8082/admin/register-path",
-                json={"path": body.path, "schema": body.schema},
+                json={"path": body.path, "response_schema": body.response_schema},
             )
             honeypot_status = "registered" if resp.status_code in (200, 201) else f"http_{resp.status_code}"
     except Exception as exc:
@@ -463,28 +671,27 @@ class HoneypotAlertPayload(BaseModel):
 @router.post("/webhooks/honeypot-alert", tags=["Webhooks"])
 async def receive_honeypot_alert(payload: HoneypotAlertPayload):
     """
-    Receive a deception hit from the dynamic honeypot server (honeypot_server.py).
-
-    The honeypot fires this webhook every time an attacker probes a quarantined
-    path. This endpoint:
-      1. Publishes the event to the auralis:honeypot-events Redis stream.
-      2. Logs the attacker details with structlog.
-
-    The intelligence-ui polls this stream (or the /inventory endpoint) to display
-    the threat intelligence dashboard.
+    Receive a deception hit from the dynamic honeypot server.
+    Input is sanitized before publishing to Redis.
     """
     redis_url = os.getenv("REDIS_URL", "redis://redis:6379")
     stream    = "auralis:honeypot-events"
 
+    # Sanitize inputs before storing in Redis stream
+    src_ip  = payload.src_ip if _IP_RE.match(payload.src_ip) else "invalid"
+    method  = payload.method.upper() if payload.method.upper() in _VALID_HTTP_METHODS else "UNKNOWN"
+    path    = payload.path[:512].replace("\x00", "")  # truncate + strip null bytes
+    body    = payload.body[:4096]
+
     event_data = {
         "event_type": "honeypot_hit",
-        "src_ip":     payload.src_ip,
-        "timestamp":  payload.timestamp,
-        "method":     payload.method,
-        "path":       payload.path,
-        "node_id":    payload.node_id,
-        "body_len":   str(len(payload.body)),
-        "user_agent": payload.headers.get("user-agent", ""),
+        "src_ip":     src_ip,
+        "timestamp":  payload.timestamp[:64],
+        "method":     method,
+        "path":       path,
+        "node_id":    payload.node_id[:64],
+        "body_len":   str(len(body)),
+        "user_agent": payload.headers.get("user-agent", "")[:256],
     }
 
     log.info(
@@ -495,13 +702,12 @@ async def receive_honeypot_alert(payload: HoneypotAlertPayload):
         node_id=payload.node_id,
     )
 
-    try:
-        client = aioredis.from_url(redis_url, decode_responses=True)
-        await client.xadd(stream, {"data": json.dumps(event_data)}, maxlen=1000, approximate=True)
-        await client.aclose()
-    except Exception as exc:
-        log.warning("failed to publish honeypot event to Redis", error=str(exc))
-        # Return 200 anyway — the honeypot server must not retry on Redis failures.
+    async with aioredis.from_url(redis_url, decode_responses=True) as client:
+        try:
+            await client.xadd(stream, {"data": json.dumps(event_data)}, maxlen=1000, approximate=True)
+        except Exception as exc:
+            log.warning("failed to publish honeypot event to Redis", error=str(exc))
+            # Return 200 anyway — the honeypot server must not retry on Redis failures.
 
     return {"status": "received", "path": payload.path}
 
@@ -520,9 +726,8 @@ async def get_honeypot_events(limit: int = 50):
     """
     redis_url = os.getenv("REDIS_URL", "redis://redis:6379")
     try:
-        client = aioredis.from_url(redis_url, decode_responses=True)
-        raw_entries = await client.xrevrange("auralis:honeypot-events", count=limit)
-        await client.aclose()
+        async with aioredis.from_url(redis_url, decode_responses=True) as client:
+            raw_entries = await client.xrevrange("auralis:honeypot-events", count=limit)
         events = []
         for _entry_id, fields in raw_entries:
             if "data" in fields:
@@ -536,6 +741,126 @@ async def get_honeypot_events(limit: int = 50):
         return {"events": [], "total": 0, "error": str(exc)}
 
 
+# ── Company Sensor Registry (install.sh / remote sensor onboarding) ───────────
+#
+# Allows external sensors installed on company servers to register themselves
+# and forward captured events directly to this brain over HTTPS.
+# Sensor registry is in-memory — survives for the lifetime of the process.
+# In production this would be persisted to PostgreSQL.
+
+import time as _time
+
+_sensor_registry: dict[str, dict] = {}   # sensor_id → {token, metadata}
+
+
+def _validate_sensor_token(request: Request) -> str:
+    """
+    Validate a sensor's bearer token against the registry.
+    Returns sensor_id on success, raises 401 on failure.
+    Sensors that haven't registered yet are rejected.
+    """
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sensor token required")
+    token = auth_header.split("Bearer ", 1)[1].strip()
+    for sid, meta in _sensor_registry.items():
+        if meta.get("sensor_token") == token:
+            return sid
+    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unknown or invalid sensor token")
+
+
+class SensorRegistration(BaseModel):
+    sensor_id: str
+    hostname: str
+    mode: str = "live"
+    version: str = "1.0.0"
+
+
+@router.post("/sensor/register", tags=["Sensor Onboarding"])
+async def register_sensor(payload: SensorRegistration, request: Request):
+    """
+    Called by the eBPF sensor on startup when BRAIN_URL is configured.
+    Returns a sensor_token that must be sent as 'Authorization: Bearer <token>'
+    on all subsequent /sensor/ingest calls.
+    """
+    sensor_id    = payload.sensor_id or f"sensor-{uuid.uuid4().hex[:8]}"
+    sensor_token = str(uuid.uuid4())
+    _sensor_registry[sensor_id] = {
+        "sensor_id":      sensor_id,
+        "sensor_token":   sensor_token,
+        "hostname":       payload.hostname,
+        "mode":           payload.mode,
+        "version":        payload.version,
+        "ip":             request.client.host if request.client else "unknown",
+        "registered_at":  _time.time(),
+        "last_seen":      _time.time(),
+        "events_forwarded": 0,
+    }
+    log.info("sensor registered", sensor_id=sensor_id, hostname=payload.hostname)
+    return {"status": "registered", "sensor_id": sensor_id, "sensor_token": sensor_token}
+
+
+@router.post("/sensor/ingest", tags=["Sensor Onboarding"])
+@_limiter.limit("120/minute")
+async def ingest_sensor_event(request: Request):
+    """
+    Accepts raw event JSON forwarded by a remote eBPF sensor.
+    Requires 'Authorization: Bearer <sensor_token>' from /sensor/register.
+    Publishes the event to the Redis stream.
+    """
+    sensor_id = _validate_sensor_token(request)
+    try:
+        body = await request.body()
+        event_data = json.loads(body)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload")
+
+    # Update registry last_seen + event counter
+    if sensor_id in _sensor_registry:
+        _sensor_registry[sensor_id]["last_seen"] = _time.time()
+        _sensor_registry[sensor_id]["events_forwarded"] += 1
+
+    # Ensure event_type is present so the consumer's _should_process filter works
+    # correctly. Remote sensors may omit it; default to "http_event".
+    event_data.setdefault("event_type", "http_event")
+
+    redis_url = os.getenv("REDIS_URL", "redis://redis:6379")
+    stream    = os.getenv("REDIS_STREAM", "auralis:events")
+    try:
+        async with aioredis.from_url(redis_url, decode_responses=True) as client:
+            await client.xadd(stream, {"data": json.dumps(event_data)}, maxlen=10000, approximate=True)
+    except Exception as exc:
+        log.warning("sensor ingest: redis publish failed", error=str(exc))
+        raise HTTPException(status_code=503, detail="Redis unavailable")
+
+    return {"status": "accepted"}
+
+
+@router.get("/sensors", tags=["Sensor Onboarding"])
+async def list_sensors():
+    """
+    Returns all registered remote sensors.
+    Used by the dashboard 'Connect Your Infrastructure' panel.
+    """
+    now = _time.time()
+    sensors = []
+    for s in _sensor_registry.values():
+        sensors.append({
+            "sensor_id":        s["sensor_id"],
+            "hostname":         s["hostname"],
+            "mode":             s["mode"],
+            "version":          s["version"],
+            "ip":               s["ip"],
+            "registered_at":    s["registered_at"],
+            "last_seen":        s["last_seen"],
+            "events_forwarded": s["events_forwarded"],
+            "online":           (now - s["last_seen"]) < 60,
+            "last_seen_ago_s":  round(now - s["last_seen"]),
+            # sensor_token is intentionally omitted from list response
+        })
+    return {"sensors": sensors, "total": len(sensors)}
+
+
 # ── Internal helpers ───────────────────────────────────────────────────────────
 
 async def _iter_checkpoints(graph, limit: int = 50):
@@ -545,19 +870,28 @@ async def _iter_checkpoints(graph, limit: int = 50):
     LangGraph's AsyncPostgresSaver exposes alist() for enumerating thread IDs.
     The in-memory MemorySaver exposes .storage for direct dict access.
     Falls back gracefully when neither is available.
+
+    Deduplicates by thread_id — alist() returns newest-first, so the first
+    checkpoint seen per thread is always the latest state, avoiding redundant
+    aget_state() calls for older checkpoint versions of the same thread.
     """
     checkpointer = getattr(graph, "checkpointer", None)
     if checkpointer is None:
         return
 
+    seen_threads: set[str] = set()
     count = 0
 
-    # AsyncPostgresSaver: alist() returns async iterator of CheckpointTuple
+    # AsyncPostgresSaver: alist() returns async iterator of CheckpointTuple newest-first
     if hasattr(checkpointer, "alist"):
         try:
             async for item in checkpointer.alist({}):
                 if count >= limit:
                     break
+                thread_id = (item.config.get("configurable") or {}).get("thread_id", "")
+                if thread_id in seen_threads:
+                    continue
+                seen_threads.add(thread_id)
                 yield item.config, item.metadata
                 count += 1
         except Exception as exc:
@@ -566,5 +900,53 @@ async def _iter_checkpoints(graph, limit: int = 50):
 
     # MemorySaver: synchronous storage dict keyed by thread_id
     if hasattr(checkpointer, "storage"):
-        for thread_id in list(checkpointer.storage.keys())[:limit]:
+        for thread_id, versions in list(checkpointer.storage.items())[:limit]:
             yield {"configurable": {"thread_id": thread_id}}, {}
+
+
+async def _iter_states_fast(graph, limit: int = 200):
+    """
+    Fast O(1-DB-call) inventory scan.
+
+    alist() streams CheckpointTuples newest-first. We deduplicate by thread_id
+    so we get only the LATEST checkpoint per thread, and read channel_values
+    directly from the tuple — avoiding one aget_state() round-trip per thread.
+    """
+    checkpointer = getattr(graph, "checkpointer", None)
+    if checkpointer is None:
+        return
+
+    seen: set[str] = set()
+    count = 0
+
+    if hasattr(checkpointer, "alist"):
+        try:
+            async for item in checkpointer.alist({}):
+                cfg        = item.config or {}
+                thread_id  = (cfg.get("configurable") or {}).get("thread_id", "")
+                if not thread_id or thread_id in seen:
+                    continue
+                seen.add(thread_id)
+                values = ((item.checkpoint or {}).get("channel_values") or {})
+                yield thread_id, values
+                count += 1
+                if count >= limit:
+                    break
+        except Exception as exc:
+            log.warning("fast checkpoint iteration failed", error=str(exc))
+        return
+
+    # MemorySaver fallback
+    # MemorySaver.storage is {thread_id: {checkpoint_id: CheckpointTuple}}
+    # CheckpointTuple is a namedtuple: (config, checkpoint, metadata, parent_config)
+    # Iteration order = insertion order, so last value = latest checkpoint.
+    if hasattr(checkpointer, "storage"):
+        for thread_id, versions in list(checkpointer.storage.items())[:limit]:
+            if not versions:
+                continue
+            # Get the latest checkpoint (last inserted entry).
+            latest_tuple = list(versions.values())[-1]
+            # CheckpointTuple index 1 = checkpoint dict with channel_values.
+            checkpoint_dict = latest_tuple[1] if (isinstance(latest_tuple, (list, tuple)) and len(latest_tuple) > 1) else {}
+            values = (checkpoint_dict.get("channel_values") or {}) if isinstance(checkpoint_dict, dict) else {}
+            yield thread_id, values

@@ -57,13 +57,14 @@
 // References:
 //   https://go.dev/s/regabi
 //   https://cs.opensource.google/go/go/+/main:src/internal/abi/abi_amd64.s
-// With -D__TARGET_ARCH_x86, bpf_tracing.h redefines struct pt_regs using
-// r-prefixed field names (rax, rbx, rcx, rdi). Use PT_REGS_* macros via
-// a typed cast so field access goes through the correct alias.
-#define GO_ARG_AX(ctx) ((__u64)PT_REGS_RC((const struct pt_regs *)(ctx)))
+// asm/ptrace.h (included above) defines struct pt_regs on x86-64 with
+// r-prefixed field names (rax, rbx, rcx, rdi). Use direct field access for
+// all four macros so they are consistent and independent of how bpf_tracing.h
+// chooses to expand PT_REGS_* on different kernel versions.
+#define GO_ARG_AX(ctx) ((__u64)(unsigned long)((const struct pt_regs *)(ctx))->rax)
 #define GO_ARG_BX(ctx) ((__u64)(unsigned long)((const struct pt_regs *)(ctx))->rbx)
-#define GO_ARG_CX(ctx) ((__u64)PT_REGS_PARM4((const struct pt_regs *)(ctx)))
-#define GO_ARG_DI(ctx) ((__u64)PT_REGS_PARM1((const struct pt_regs *)(ctx)))
+#define GO_ARG_CX(ctx) ((__u64)(unsigned long)((const struct pt_regs *)(ctx))->rcx)
+#define GO_ARG_DI(ctx) ((__u64)(unsigned long)((const struct pt_regs *)(ctx))->rdi)
 
 // ── Syscall Tracepoint Argument Accessors ─────────────────────────────────────
 //

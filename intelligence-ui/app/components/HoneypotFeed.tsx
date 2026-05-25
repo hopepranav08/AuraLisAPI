@@ -17,199 +17,122 @@ interface Props {
     events: HoneypotEvent[];
 }
 
-function relativeTime(timestamp: string): string {
+function relativeTime(ts: string): string {
     try {
-        const ts = new Date(timestamp).getTime();
-        if (isNaN(ts)) return timestamp;
-        const diff = Math.floor((Date.now() - ts) / 1000);
-        if (diff < 5)   return "just now";
-        if (diff < 60)  return `${diff}s ago`;
+        const diff = Math.floor((Date.now() - new Date(ts).getTime()) / 1000);
+        if (isNaN(diff) || diff < 0) return "just now";
+        if (diff < 5)    return "just now";
+        if (diff < 60)   return `${diff}s ago`;
         if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
         if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
         return `${Math.floor(diff / 86400)}d ago`;
-    } catch {
-        return timestamp;
-    }
+    } catch { return ts; }
 }
 
-function methodClass(method: string): string {
-    switch ((method || "").toUpperCase()) {
-        case "GET":    return "method--get";
-        case "POST":   return "method--post";
-        case "DELETE": return "method--delete";
-        case "PUT":    return "method--put";
-        case "PATCH":  return "method--patch";
-        default:       return "method--other";
-    }
-}
-
-function methodBorderColor(method: string): string {
-    switch ((method || "").toUpperCase()) {
-        case "GET":    return "var(--color-info)";
-        case "POST":   return "var(--color-warning)";
-        case "DELETE": return "var(--color-danger)";
-        case "PUT":    return "var(--color-accent)";
-        case "PATCH":  return "var(--color-ok)";
-        default:       return "var(--color-border)";
-    }
-}
+const METHOD_STYLES: Record<string, { badgeClass: string }> = {
+    GET:    { badgeClass: "badge--medium"   },
+    POST:   { badgeClass: "badge--high"     },
+    DELETE: { badgeClass: "badge--critical" },
+    PUT:    { badgeClass: "badge--purple"   },
+    PATCH:  { badgeClass: "badge--ok"       },
+    HEAD:   { badgeClass: ""                },
+};
 
 export default function HoneypotFeed({ events }: Props) {
     const feedRef = useRef<HTMLDivElement>(null);
 
-    // Auto-scroll to the top when new events arrive (newest first)
     useEffect(() => {
-        if (feedRef.current) {
+        // Only snap to top when user is already near the top (looking at latest events).
+        // If they've scrolled down to read older entries, don't interrupt them.
+        if (feedRef.current && feedRef.current.scrollTop < 80) {
             feedRef.current.scrollTop = 0;
         }
     }, [events.length]);
 
-    // Show up to 20 entries
-    const visible = events.slice(0, 20);
+    const visible = events.slice(0, 25);
+    const methodCounts = events.reduce<Record<string, number>>((acc, ev) => {
+        const m = (ev.method || "?").toUpperCase();
+        acc[m] = (acc[m] ?? 0) + 1;
+        return acc;
+    }, {});
 
     return (
-        <div className="honeypot-panel">
-            <div className="honeypot-panel__header">
-                <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                    <span
-                        style={{
-                            fontWeight: 700,
-                            textTransform: "uppercase",
-                            letterSpacing: "0.1em",
-                            fontSize: "0.75rem",
-                            color: "var(--color-text-muted)",
-                        }}
-                    >
-                        Threat Intelligence
-                    </span>
-                    {/* Honeypot icon */}
-                    <svg
-                        width="14"
-                        height="14"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="var(--color-warning)"
-                        strokeWidth={2}
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                    >
-                        <path d="M18 8h1a4 4 0 0 1 0 8h-1" />
-                        <path d="M2 8h16v9a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4V8z" />
-                        <line x1="6" y1="1" x2="6" y2="4" />
-                        <line x1="10" y1="1" x2="10" y2="4" />
-                        <line x1="14" y1="1" x2="14" y2="4" />
-                    </svg>
-                </div>
-                <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                    {events.length > 0 && (
-                        <div className="live-dot" title="Live threat feed" />
-                    )}
-                    <span className="panel-header__count">
-                        {events.length} hits
+        <div className="panel" style={{ height: "100%" }}>
+            {/* Header */}
+            <div className="panel-hdr" style={{ flexDirection: "column", alignItems: "flex-start", gap: "8px" }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                        <span className="panel-title">THREAT INTEL</span>
+                    </div>
+                    <span className={`badge ${events.length > 0 ? "badge--critical" : ""}`} style={events.length === 0 ? { color: "var(--t3)", borderColor: "var(--b2)" } : {}}>
+                        {events.length} HITS
                     </span>
                 </div>
+                {events.length > 0 && (
+                    <div style={{ display: "flex", gap: "4px", flexWrap: "wrap" }}>
+                        {Object.entries(methodCounts).map(([m, count]) => {
+                            const s = METHOD_STYLES[m] ?? { badgeClass: "" };
+                            return (
+                                <span key={m} className={`badge ${s.badgeClass}`} style={!s.badgeClass ? { color: "var(--t3)", borderColor: "var(--b2)" } : {}}>
+                                    {m} ×{count}
+                                </span>
+                            );
+                        })}
+                    </div>
+                )}
             </div>
 
+            {/* Feed */}
             {events.length === 0 ? (
-                <div className="radar-empty">
-                    <div className="radar-icon">
-                        <div className="radar-icon__sweep" />
-                        <div className="radar-icon__dot" />
-                    </div>
-                    <p className="radar-empty__text">
-                        Honeypot active — no probes detected yet
-                    </p>
-                    <p
-                        style={{
-                            fontSize: "0.65rem",
-                            color: "var(--color-text-dim)",
-                            fontFamily: "var(--font-mono)",
-                        }}
-                    >
-                        Listening on quarantined API paths
-                    </p>
+                <div className="empty-state">
+                    <span style={{ fontSize: "24px" }}>◉</span>
+                    <span>// honeypot active — no probes</span>
                 </div>
             ) : (
-                <div ref={feedRef} className="honeypot-feed">
-                    {visible.map((event, idx) => (
-                        <div
-                            key={`${event.src_ip}-${event.timestamp}-${idx}`}
-                            className="feed-entry"
-                            style={{
-                                // @ts-ignore — CSS custom property for border-left color
-                                "--feed-method-color": methodBorderColor(event.method),
-                            } as React.CSSProperties}
-                        >
-                            <span className={`feed-entry__method ${methodClass(event.method)}`}>
-                                {(event.method || "?").toUpperCase().slice(0, 6)}
-                            </span>
-
-                            <div className="feed-entry__body">
-                                <div className="feed-entry__top">
-                                    <span className="feed-entry__ip">
-                                        {event.src_ip || "unknown"}
-                                    </span>
-                                    <span className="feed-entry__time">
-                                        {relativeTime(event.timestamp)}
-                                    </span>
-                                </div>
-
-                                <div
-                                    className="feed-entry__path"
-                                    title={event.path}
-                                >
-                                    {event.path || "—"}
-                                </div>
-
-                                {event.user_agent && (
-                                    <div
-                                        className="feed-entry__ua"
-                                        title={event.user_agent}
-                                    >
-                                        {event.user_agent}
+                <div ref={feedRef} style={{ flex: 1, overflowY: "auto", minHeight: 0 }}>
+                    {visible.map((ev, idx) => {
+                        const method = (ev.method || "?").toUpperCase();
+                        const mStyle = METHOD_STYLES[method] ?? { badgeClass: "" };
+                        return (
+                            <div key={`${ev.src_ip}-${ev.timestamp}-${idx}`}
+                                style={{
+                                    display: "flex",
+                                    gap: "8px",
+                                    padding: "6px 10px",
+                                    borderBottom: "1px solid var(--b1)",
+                                    alignItems: "flex-start",
+                                    transition: "background 0.1s",
+                                }}
+                                onMouseEnter={e => { (e.currentTarget as HTMLDivElement).style.background = "var(--s2)"; }}
+                                onMouseLeave={e => { (e.currentTarget as HTMLDivElement).style.background = ""; }}
+                            >
+                                <span className={`badge ${mStyle.badgeClass}`} style={!mStyle.badgeClass ? { color: "var(--t3)", borderColor: "var(--b2)" } : { flexShrink: 0, marginTop: 1 }}>
+                                    {method.slice(0, 6)}
+                                </span>
+                                <div style={{ flex: 1, minWidth: 0 }}>
+                                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "2px" }}>
+                                        <span style={{ fontSize: "12px", fontWeight: 700, color: "var(--t1)", fontFamily: "var(--mono)" }}>
+                                            {ev.src_ip || "unknown"}
+                                        </span>
+                                        <span style={{ fontSize: "10px", color: "var(--t3)", fontFamily: "var(--mono)", flexShrink: 0, marginLeft: 8 }}>
+                                            {relativeTime(ev.timestamp)}
+                                        </span>
                                     </div>
-                                )}
-
-                                <div
-                                    style={{
-                                        display: "flex",
-                                        alignItems: "center",
-                                        gap: "0.75rem",
-                                        marginTop: "0.125rem",
-                                    }}
-                                >
-                                    {event.body_len && event.body_len !== "0" && (
-                                        <span className="feed-entry__body-len">
-                                            {event.body_len}b body
-                                        </span>
-                                    )}
-                                    {event.node_id && event.node_id !== "unknown" && (
-                                        <span
-                                            style={{
-                                                fontSize: "0.62rem",
-                                                color: "var(--color-text-dim)",
-                                                fontFamily: "var(--font-mono)",
-                                            }}
-                                        >
-                                            node: {event.node_id}
-                                        </span>
+                                    <div style={{ fontSize: "11px", color: "var(--red)", fontFamily: "var(--mono)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={ev.path}>
+                                        {ev.path || "—"}
+                                    </div>
+                                    {ev.user_agent && (
+                                        <div style={{ fontSize: "10px", color: "var(--t3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginTop: "2px", fontFamily: "var(--mono)" }} title={ev.user_agent}>
+                                            {ev.user_agent}
+                                        </div>
                                     )}
                                 </div>
                             </div>
-                        </div>
-                    ))}
-
-                    {events.length > 20 && (
-                        <div
-                            style={{
-                                textAlign: "center",
-                                fontSize: "0.7rem",
-                                color: "var(--color-text-muted)",
-                                padding: "0.5rem",
-                                fontFamily: "var(--font-mono)",
-                            }}
-                        >
-                            +{events.length - 20} older entries
+                        );
+                    })}
+                    {events.length > 25 && (
+                        <div style={{ textAlign: "center", fontSize: "10px", color: "var(--t3)", padding: "8px 6px", fontFamily: "var(--mono)", borderTop: "1px dashed var(--b2)" }}>
+                            // showing 25 most recent · {events.length - 25} older not shown
                         </div>
                     )}
                 </div>

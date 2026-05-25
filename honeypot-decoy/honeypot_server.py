@@ -60,6 +60,9 @@ _REGISTRY_FILE   = Path("/app/paths.json")
 # In-memory path registry: { "/api/v1/payments": {"schema": {...}, "registered_at": ...} }
 _REGISTRY: dict[str, dict[str, Any]] = {}
 
+# Strong references to in-flight fire-and-forget tasks (prevents GC before completion).
+_bg_tasks: set[asyncio.Task] = set()
+
 
 # ── Registry persistence ───────────────────────────────────────────────────────
 
@@ -146,23 +149,31 @@ def _generate_fake_response(path: str, schema: dict[str, Any]) -> dict[str, Any]
     # ── Path-heuristic generation ──────────────────────────────────────────────
     path_lc = path.lower()
 
-    if any(kw in path_lc for kw in ("user", "account", "profile", "member")):
+    if any(kw in path_lc for kw in ("user", "account", "profile", "member", "admin")):
         return {
-            "id":         fake.random_int(min=1000, max=99999),
-            "name":       fake.name(),
-            "email":      fake.email(),
-            "phone":      fake.phone_number(),
-            "created_at": fake.iso8601(),
-            "status":     "active",
+            "id":           fake.random_int(min=1000, max=99999),
+            "name":         fake.name(),
+            "email":        fake.email(),
+            "phone":        fake.phone_number(),
+            "ssn":          fake.ssn(),
+            "date_of_birth": fake.date_of_birth(minimum_age=18, maximum_age=75).isoformat(),
+            "address":      fake.address().replace("\n", ", "),
+            "created_at":   fake.iso8601(),
+            "status":       "active",
         }
-    if any(kw in path_lc for kw in ("payment", "transaction", "invoice", "charge")):
+    if any(kw in path_lc for kw in ("payment", "transaction", "invoice", "charge", "billing", "legacy")):
         return {
             "transaction_id": f"tx-{fake.random_int(min=10000, max=99999)}",
             "amount":         round(
                 fake.pyfloat(min_value=1.0, max_value=10000.0, right_digits=2), 2
             ),
             "currency":       fake.currency_code(),
+            "card_number":    fake.credit_card_number(card_type=None),
+            "card_type":      fake.credit_card_provider(),
+            "card_expiry":    fake.credit_card_expire(),
+            "card_cvv":       fake.credit_card_security_code(),
             "status":         fake.random_element(["completed", "pending", "failed"]),
+            "merchant_id":    f"MER-{fake.bothify(text='####-????').upper()}",
             "created_at":     fake.iso8601(),
         }
     if any(kw in path_lc for kw in ("product", "item", "catalog", "sku")):
@@ -186,19 +197,31 @@ def _generate_fake_response(path: str, schema: dict[str, Any]) -> dict[str, Any]
             "status":     fake.random_element(["processing", "shipped", "delivered"]),
             "created_at": fake.iso8601(),
         }
-    if any(kw in path_lc for kw in ("auth", "login", "token", "session")):
+    if any(kw in path_lc for kw in ("auth", "login", "token", "session", "oauth")):
         return {
-            "token":      fake.sha256(),
-            "expires_in": 3600,
-            "token_type": "Bearer",
+            "access_token":  fake.sha256(),
+            "refresh_token": fake.sha256(),
+            "expires_in":    3600,
+            "token_type":    "Bearer",
+            "scope":         "read write",
+        }
+    if any(kw in path_lc for kw in ("export", "report", "dump", "internal", "config")):
+        return {
+            "records": [
+                {"id": fake.random_int(min=1, max=99999), "email": fake.email(),
+                 "name": fake.name(), "ssn": fake.ssn()}
+                for _ in range(fake.random_int(min=2, max=5))
+            ],
+            "total":      fake.random_int(min=100, max=50000),
+            "exported_at": fake.iso8601(),
         }
 
     # ── Generic fallback ───────────────────────────────────────────────────────
     return {
-        "id":         str(uuid.uuid4()),
-        "status":     "ok",
-        "timestamp":  datetime.now(timezone.utc).isoformat(),
-        "data":       {},
+        "id":        str(uuid.uuid4()),
+        "status":    "ok",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "data":      {},
     }
 
 
@@ -242,7 +265,7 @@ async def _fire_webhook(
 # ── FastAPI application ────────────────────────────────────────────────────────
 
 @asynccontextmanager
-async def _lifespan(application: FastAPI):
+async def _lifespan(_application: FastAPI):
     _load_registry()
     log.info("honeypot server started", node_id=NODE_ID, port=8082)
     yield
@@ -259,8 +282,10 @@ app = FastAPI(
 # ── Admin API (internal — only reachable within the Docker network) ────────────
 
 class RegisterPathRequest(BaseModel):
-    path:   str
-    schema: dict[str, Any] = {}   # JSON schema for response generation
+    path:            str
+    response_schema: dict[str, Any] = {}   # JSON schema for response generation
+    # BUG FIX #5: renamed from 'schema' — that name shadows Pydantic BaseModel.schema()
+    # classmethod and generates a UserWarning on every import.
 
 
 @app.post("/admin/register-path", tags=["Admin"])
@@ -270,10 +295,10 @@ async def register_path(body: RegisterPathRequest):
     Called by EnforcerNode after a GitHub PR is created.
     """
     _REGISTRY[body.path] = {
-        "schema":        body.schema,
+        "schema":        body.response_schema,
         "registered_at": datetime.now(timezone.utc).isoformat(),
     }
-    _save_registry()
+    await asyncio.to_thread(_save_registry)
     log.info("honeypot path registered", path=body.path)
     return {
         "status":      "registered",
@@ -299,7 +324,7 @@ async def unregister_path(path: str):
     """Remove a path from the deception registry."""
     removed = _REGISTRY.pop(path, None)
     if removed is not None:
-        _save_registry()
+        await asyncio.to_thread(_save_registry)
     return {"status": "unregistered" if removed else "not_found", "path": path}
 
 
@@ -350,7 +375,10 @@ async def deception_handler(full_path: str, request: Request):
     )
 
     # Fire webhook without awaiting — attacker gets response immediately.
-    asyncio.create_task(_fire_webhook(src_ip, method, path, headers, body))
+    # Keep a strong reference so GC cannot collect the task before it finishes.
+    _task = asyncio.create_task(_fire_webhook(src_ip, method, path, headers, body))
+    _bg_tasks.add(_task)
+    _task.add_done_callback(_bg_tasks.discard)
 
     # Look up schema for this exact path; fall back to prefix match.
     entry  = _REGISTRY.get(path)

@@ -32,9 +32,25 @@
 #define MAX_BUF_LEN    256
 
 // ── BPF CO-RE shadow structs ───────────────────────────────────────────────────
-// preserve_access_index enables BTF-based field relocation at load time,
-// making the program portable across kernel versions >= 5.2.
-// Only fields we access need to be listed.
+// preserve_access_index enables BTF-based field relocation at load time.
+// The BPF loader adjusts field offsets against the running kernel's BTF at
+// load time, so the byte offsets here are irrelevant — only field names matter.
+//
+// ── iov_iter kernel version compatibility ────────────────────────────────────
+// The `iov` field in iov_iter is accessed via CO-RE. Kernel compatibility:
+//
+//   Linux < 5.14  : iov_iter.iov is a direct pointer field — CO-RE relocates OK.
+//   Linux 5.14–5.x: iov field moved into a union; still named `iov` — CO-RE OK.
+//   Linux 6.0+    : field renamed to `__iov` inside the union — CO-RE FAILS.
+//
+// If CO-RE relocation fails at load time, LoadHttpTraceObjects() in live.go
+// returns an error. This is now handled gracefully: the sensor logs a warning
+// and continues with syscall tracepoints + TLS uprobes (sensor.c), which
+// provide equivalent coverage for all practical use cases.
+//
+// To support kernel 6.0+, replace this shadow struct with a dual-field approach
+// using bpf_core_field_exists() to check which field name the running kernel has.
+// That change requires a kernel to test against and is tracked as a future task.
 
 struct iovec {
     void              *iov_base;
@@ -48,7 +64,7 @@ struct iov_iter {
     __u8              user_backed;
     __kernel_size_t   iov_offset;
     __kernel_size_t   count;
-    const struct iovec *iov;
+    const struct iovec *iov; // renamed to __iov in kernel >= 6.0; CO-RE load fails there
 } __attribute__((preserve_access_index));
 
 struct sock; // forward — not dereferenced
@@ -113,6 +129,9 @@ static __always_inline int parse_http_method(const char *buf, __u32 buf_len,
     }
     if (tmp[0]=='P' && tmp[1]=='A' && tmp[2]=='T' && tmp[3]=='C') {
         __builtin_memcpy(out, "PATCH\0", 6); return 0;
+    }
+    if (tmp[0]=='H' && tmp[1]=='E' && tmp[2]=='A' && tmp[3]=='D') {
+        __builtin_memcpy(out, "HEAD\0",  5); return 0;
     }
     return -1;
 }

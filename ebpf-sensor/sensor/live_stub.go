@@ -17,7 +17,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func newLiveSensor(cfg Config, _ *zap.Logger) (Sensor, error) {
+func newLiveSensor(_ Config, _ *zap.Logger) (Sensor, error) {
 	return nil, fmt.Errorf(
 		"live eBPF sensor requires Linux kernel >= 5.8 — current build target is not linux; use SENSOR_MODE=mock",
 	)

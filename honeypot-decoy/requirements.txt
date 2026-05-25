@@ -3,6 +3,10 @@
 
 # ── OpenCanary honeypot daemon ─────────────────────────────────────────────────
 opencanary==0.9.3
+# NOTE (Bug #6): OpenCanary 0.9.3 transitively pins cryptography==38.0.1 via pyOpenSSL/ntlmlib.
+# Forcing cryptography>=42 here breaks pip resolution. The Blowfish/CAST5 deprecation warnings
+# from twisted.conch are suppressed via PYTHONWARNINGS in start.sh instead.
+
 
 # ── Redis client for forwarding honeypot events to auralis:honeypot-events ────
 redis==5.2.0

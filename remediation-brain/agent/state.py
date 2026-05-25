@@ -29,8 +29,8 @@ class IncidentState(TypedDict):
     # Raw API event that triggered this incident workflow
     raw_event: dict[str, Any]
 
-    # Classification: "shadow" | "active_zombie" | "dormant_zombie" | "unknown"
-    classification: Optional[Literal["shadow", "active_zombie", "dormant_zombie", "unknown"]]
+    # Classification: "shadow" | "active_zombie" | "dormant_zombie" | "orphaned" | "unknown"
+    classification: Optional[Literal["shadow", "active_zombie", "dormant_zombie", "orphaned", "unknown"]]
 
     # Risk severity: "critical" | "high" | "medium" | "low"
     severity: Optional[Literal["critical", "high", "medium", "low"]]

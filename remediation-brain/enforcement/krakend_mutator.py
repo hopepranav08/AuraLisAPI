@@ -95,7 +95,8 @@ def _build_410_block(endpoint_path: str, method: str, incident_id: str) -> dict:
                     ),
                     "sunset":  "2025-01-01T00:00:00Z",
                 },
-                "strategy": "always",
+                "strategy":    "always",
+                "status_code": 410,
             }
         },
     }

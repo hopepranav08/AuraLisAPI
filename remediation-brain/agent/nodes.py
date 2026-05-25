@@ -20,18 +20,20 @@
 #     runs without explicit /incidents/{id}/approve API call
 from __future__ import annotations
 
+import asyncio
 import base64
+import copy
 import json
 import math
 import os
 import re
 import uuid
-import yaml
+import yaml  # type: ignore[import]
 from typing import Any, Literal, Optional
 
-import httpx
-import structlog
-from pydantic import BaseModel, Field
+import httpx  # type: ignore[import]
+import structlog  # type: ignore[import]
+from pydantic import BaseModel, Field  # type: ignore[import]
 
 from agent.state import IncidentState
 
@@ -55,29 +57,81 @@ class IncidentReport(BaseModel):
 # Phase 4: KrakenD mutator — imported with graceful fallback so the module
 # still loads even if the enforcement package is temporarily unavailable.
 try:
-    from enforcement.krakend_mutator import mutate_krakend, KrakendMutationResult
+    from enforcement.krakend_mutator import mutate_krakend
     _MUTATOR_AVAILABLE = True
 except ImportError:
     _MUTATOR_AVAILABLE = False
 
 log = structlog.get_logger(__name__)
 
-# ── Groq LLM (optional — falls back to heuristics if key not set) ─────────────
+_HONEYPOT_URL = os.getenv("HONEYPOT_URL", "http://honeypot-decoy:8082")
+
+# ── LLM: Claude claude-haiku-4-5 primary, Groq fallback, heuristics last resort ────────────
 _llm = None
-_llm_structured = None   # ChatGroq bound to IncidentReport schema
-_groq_key = os.getenv("GROQ_API_KEY", "")
-if _groq_key:
+_llm_structured = None
+
+_anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
+_groq_key      = os.getenv("GROQ_API_KEY", "")
+
+if _anthropic_key:
     try:
-        from langchain_groq import ChatGroq
+        from langchain_anthropic import ChatAnthropic  # type: ignore[import]
+        _llm = ChatAnthropic(
+            model="claude-haiku-4-5-20251001",
+            anthropic_api_key=_anthropic_key,
+            temperature=0,
+            max_tokens=1024,
+        )
+        _llm_structured = _llm.with_structured_output(IncidentReport)
+        log.info("LLM: Claude claude-haiku-4-5 loaded (primary)")
+    except Exception as exc:
+        log.warning("Claude claude-haiku-4-5 init failed", error=str(exc))
+        _llm = None
+        _llm_structured = None
+
+if _llm is None and _groq_key:
+    try:
+        from langchain_groq import ChatGroq  # type: ignore[import]
         _llm = ChatGroq(
             model=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
             groq_api_key=_groq_key,
             temperature=0,
         )
         _llm_structured = _llm.with_structured_output(IncidentReport)
-    except Exception:
+        log.info("LLM: Groq loaded (fallback)")
+    except Exception as exc:
+        log.warning("Groq init failed", error=str(exc))
         _llm = None
         _llm_structured = None
+
+if _llm is None:
+    log.warning("No LLM configured — incident reports will use heuristics. Set ANTHROPIC_API_KEY for AI summaries.")
+
+# ── LLM rate-limit cooldown tracker (Fix H2) ─────────────────────────────────
+# When a 429 (rate limit) is received, we skip LLM calls for _LLM_COOLDOWN_SECS
+# to avoid burning tokens on doomed requests. Resets after the cooldown expires.
+import time as _time  # noqa: E402 (import after statements intentional here)
+_llm_rate_limited_until: float = 0.0   # epoch seconds; 0 = not rate-limited
+_LLM_COOLDOWN_SECS = 300               # 5 minutes — matches Groq TPD reset window
+
+
+def _llm_available() -> bool:
+    """Return True if the LLM is configured and not in rate-limit cooldown."""
+    if _llm_structured is None:
+        return False
+    if _time.time() < _llm_rate_limited_until:
+        return False
+    return True
+
+
+def _mark_rate_limited() -> None:
+    """Enter cooldown after receiving a 429. Thread-safe via GIL (float assign)."""
+    global _llm_rate_limited_until
+    _llm_rate_limited_until = _time.time() + _LLM_COOLDOWN_SECS
+    log.warning("LLM rate-limited — switching to heuristics",
+                cooldown_secs=_LLM_COOLDOWN_SECS)
+
+
 
 # ── GitHub client (optional — graceful degradation when token absent) ──────────
 _github = None
@@ -86,7 +140,7 @@ _github_repo = os.getenv("GITHUB_REPO", "")
 if _github_token:
     try:
         from github import Github, GithubException  # type: ignore[import]
-        _github = Github(_github_token)
+        _github = Github(_github_token, timeout=8)
     except Exception:
         _github = None
 
@@ -153,22 +207,32 @@ def _detect_pii(payload_str: str) -> list[str]:
 
 def _fetch_openapi_spec() -> Optional[dict[str, Any]]:
     """
-    Fetch and parse the OpenAPI 3.0 spec from GitHub.
+    Fetch and parse the OpenAPI 3.0 spec.
 
-    Returns parsed dict on success, None on any failure (no token, repo not set,
-    file not found, parse error). Callers must handle None gracefully.
+    Priority: GitHub (authoritative) → local /app/openapi.yaml (mounted fallback).
+    Returns parsed dict on success, None when neither source is available.
     """
-    if _github is None or not _github_repo:
-        return None
-    try:
-        from github import GithubException  # type: ignore[import]
-        repo = _github.get_repo(_github_repo)
-        contents = repo.get_contents(_OPENAPI_SPEC_PATH)
-        raw = base64.b64decode(contents.content).decode("utf-8")
-        return yaml.safe_load(raw)
-    except Exception as exc:
-        log.warning("openapi spec fetch failed — using heuristics", error=str(exc))
-        return None
+    if _github is not None and _github_repo:
+        try:
+            from github import GithubException  # type: ignore[import]
+            repo = _github.get_repo(_github_repo)
+            contents = repo.get_contents(_OPENAPI_SPEC_PATH)
+            raw = base64.b64decode(contents.content).decode("utf-8")
+            return yaml.safe_load(raw)
+        except Exception as exc:
+            log.warning("openapi github fetch failed — trying local fallback", error=str(exc))
+
+    # Local fallback: openapi.yaml mounted at /app/openapi.yaml in the container
+    import os as _os
+    local_path = "/app/openapi.yaml"
+    if _os.path.exists(local_path):
+        try:
+            with open(local_path) as f:
+                return yaml.safe_load(f)
+        except Exception as exc:
+            log.warning("openapi local spec read failed", error=str(exc))
+
+    return None
 
 
 def _extract_spec_paths(spec: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -214,9 +278,10 @@ def _build_krakend_410_block(path: str, incident_id: str) -> dict[str, Any]:
                         f"(incident {incident_id}). Migrate to /api/v3/."
                     ),
                     "sunset": "2025-01-01T00:00:00Z",
-                    "docs": f"https://github.com/{_github_repo}/blob/main/MIGRATION.md",
+                    **({"docs": f"https://github.com/{_github_repo}/blob/main/MIGRATION.md"} if _github_repo else {}),
                 },
-                "strategy": "always",
+                "strategy":    "always",
+                "status_code": 410,
             }
         },
     }
@@ -269,7 +334,9 @@ async def analyze_node(state: IncidentState) -> dict[str, Any]:
     event_type  = raw.get("event_type", "http_event")
 
     # ── Step 1: Fetch spec ─────────────────────────────────────────────────────
-    spec       = _fetch_openapi_spec()
+    # PyGithub makes synchronous HTTP requests — run in thread pool to avoid
+    # blocking the asyncio event loop.
+    spec       = await asyncio.to_thread(_fetch_openapi_spec)
     spec_paths = _extract_spec_paths(spec) if spec else {}
     used_spec  = bool(spec_paths)
 
@@ -278,6 +345,19 @@ async def analyze_node(state: IncidentState) -> dict[str, Any]:
         "found_in_spec":    path in spec_paths,
         "deprecated_in_spec": _is_deprecated_in_spec(path, spec_paths) if used_spec else False,
     }
+
+    # Extract the OpenAPI response schema for this path so the honeypot can
+    # serve spec-accurate fake responses instead of pure heuristic ones.
+    if used_spec and path in spec_paths:
+        path_item = spec_paths[path]
+        for method_item in path_item.values():
+            if not isinstance(method_item, dict):
+                continue
+            ok = method_item.get("responses", {}).get("200", method_item.get("responses", {}).get("201", {}))
+            schema = ok.get("content", {}).get("application/json", {}).get("schema", {})
+            if schema:
+                spec_diff["response_schema"] = schema
+                break
 
     # ── Step 2: Classify ──────────────────────────────────────────────────────
     classification: Literal["shadow", "active_zombie", "dormant_zombie", "unknown"]
@@ -342,17 +422,20 @@ async def analyze_node(state: IncidentState) -> dict[str, Any]:
     spec_note = f" [spec:{'github' if used_spec else 'heuristics'}]"
 
     return {
-        "classification":     classification,
-        "severity":           severity,
-        "is_pii_exposed":     is_pii_exposed,
-        "pii_findings":       pii_found,
-        "spec_diff":          spec_diff,
-        "enforcement_approved": severity in ("critical", "high"),
+        "classification": classification,
+        "severity":       severity,
+        "is_pii_exposed": is_pii_exposed,
+        "pii_findings":   pii_found,
+        "spec_diff":      spec_diff,
+        # enforcement_approved is intentionally NOT set here.
+        # It is initialised to False in consumer.py and can only be set to True
+        # by POST /incidents/{id}/approve — the mandatory human-in-the-loop gate.
         "reasoning_trace": [
             f"[analyze] path='{path}' → classification={classification}, "
             f"severity={severity}, pii={pii_found}{drift_note}{spec_note}"
         ],
     }
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -428,10 +511,28 @@ async def plan_node(state: IncidentState) -> dict[str, Any]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def should_enforce(state: IncidentState) -> Literal["enforce", "report"]:
-    """Route to enforce if severity warrants it, else skip straight to report."""
-    if state.get("enforcement_approved"):
+    """
+    Route graph to 'enforce' (human-approval gate) or skip to 'report'.
+
+    IMPORTANT: This edge fires BEFORE the interrupt_before=["enforce"] halt.
+    The interrupt halts the graph. When resumed via POST /approve, LangGraph
+    resumes from the enforce node (enforcement_approved is now True).
+    When rejected via POST /reject, the graph is re-routed externally to
+    generate_report without calling enforce.
+
+    Routing logic:
+    - critical / high severity  → route to "enforce"
+      → graph pauses at interrupt (awaiting_approval)
+      → human approves → enforce runs → report
+      → human rejects → report directly (via /reject API)
+    - medium / low severity → skip to "report" immediately
+      (no enforcement action warranted for low-signal events)
+    """
+    severity = (state.get("severity") or "").lower()
+    if severity in ("critical", "high"):
         return "enforce"
     return "report"
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -509,12 +610,18 @@ async def enforce_node(state: IncidentState) -> dict[str, Any]:
             except Exception as exc:
                 raise RuntimeError(f"failed to fetch krakend.json: {exc}") from exc
 
-            # 2. Inject the 410 block if not already present.
-            existing_endpoints = {ep.get("endpoint") for ep in current_cfg.get("endpoints", [])}
-            if krakend_block and krakend_block.get("endpoint") not in existing_endpoints:
-                post_block = dict(krakend_block)
-                post_block["method"] = "POST"
-                current_cfg["endpoints"].extend([krakend_block, post_block])
+            # 2. Inject 410 blocks for all 5 methods — consistent with local mutator.
+            existing_pairs = {
+                (ep.get("endpoint"), ep.get("method"))
+                for ep in current_cfg.get("endpoints", [])
+            }
+            if krakend_block:
+                ep_path = krakend_block.get("endpoint")
+                for http_method in ["GET", "POST", "PUT", "DELETE", "PATCH"]:
+                    if (ep_path, http_method) not in existing_pairs:
+                        method_block = copy.deepcopy(krakend_block)
+                        method_block["method"] = http_method
+                        current_cfg["endpoints"].append(method_block)
 
             updated_str = json.dumps(current_cfg, indent=4)
 
@@ -562,7 +669,9 @@ async def enforce_node(state: IncidentState) -> dict[str, Any]:
     # Mutates the locally-mounted krakend.json immediately so the 410 block is
     # visible in GET /gateway/config without waiting for the PR to be merged.
     if _MUTATOR_AVAILABLE:
-        mutation = mutate_krakend(path, incident_id)
+        # mutate_krakend() is synchronous file I/O — run in thread pool to
+        # avoid blocking the asyncio event loop during the write.
+        mutation = await asyncio.to_thread(mutate_krakend, path, incident_id)
         if mutation.success and mutation.methods_added:
             executed.append(
                 f"[enforce] krakend.json mutated locally: "
@@ -581,12 +690,12 @@ async def enforce_node(state: IncidentState) -> dict[str, Any]:
     # Fire-and-forget HTTP POST to honeypot-decoy:8082/admin/register-path so
     # the deception server immediately starts serving fake responses for this path.
     spec_diff = state.get("spec_diff") or {}
-    schema    = spec_diff.get("schema", {})
+    schema    = spec_diff.get("response_schema", {})
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
             resp = await client.post(
-                "http://honeypot-decoy:8082/admin/register-path",
-                json={"path": path, "schema": schema},
+                f"{_HONEYPOT_URL}/admin/register-path",
+                json={"path": path, "response_schema": schema},
             )
             if resp.status_code in (200, 201):
                 executed.append(f"[enforce] honeypot path registered: {path}")
@@ -683,8 +792,8 @@ async def report_node(state: IncidentState) -> dict[str, Any]:
         "reasoning_trace": trace,
     }
 
-    if _llm_structured is None:
-        # Heuristic fallback — build plain-text fields from state
+    if not _llm_available():
+        # Heuristic fallback — LLM not configured or in rate-limit cooldown
         pii_note = f" PII exposure detected: {pii}. CISO escalation recommended." if is_pii else ""
         action_summary = "; ".join(actions) if actions else "no enforcement actions taken"
         meta.update({
@@ -720,6 +829,7 @@ async def report_node(state: IncidentState) -> dict[str, Any]:
         f"The recommended_action must be a single concrete step."
     )
     try:
+        assert _llm_structured is not None  # guaranteed by _llm_available() check above
         llm_report: IncidentReport = await _llm_structured.ainvoke(prompt)
         meta.update({
             "executive_summary":  llm_report.executive_summary,
@@ -728,7 +838,12 @@ async def report_node(state: IncidentState) -> dict[str, Any]:
             "technical_detail":   llm_report.technical_detail,
         })
     except Exception as exc:
-        log.warning("structured LLM report failed, using heuristics", error=str(exc))
+        err_str = str(exc)
+        # Detect rate-limit (429) and enter cooldown to avoid repeated failed calls.
+        if "429" in err_str or "rate_limit" in err_str.lower() or "rate limit" in err_str.lower():
+            _mark_rate_limited()
+        else:
+            log.warning("structured LLM report failed, using heuristics", error=err_str)
         meta.update({
             "executive_summary":  "AI analysis unavailable — see technical detail.",
             "risk_level":         severity or "unknown",

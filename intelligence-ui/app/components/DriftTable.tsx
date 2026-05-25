@@ -16,56 +16,26 @@ interface Props {
     selectedEndpoint: string | null;
 }
 
-const PH_ALARM_THRESHOLD = 25;
-const PH_BAR_MAX = 30;
+const PH_ALARM = 25;
 
-function getRowClass(stat: EndpointStats, isSelected: boolean): string {
-    if (isSelected) return "row--selected";
-    if (stat.ph_score > PH_ALARM_THRESHOLD) return "row--alarm";
-    if (stat.dormant) return "row--dormant";
-    return "row--ok";
-}
-
-function getStatusBadge(stat: EndpointStats): { label: string; cls: string } {
-    if (stat.ph_score > PH_ALARM_THRESHOLD && stat.dormant) {
-        return { label: "RESURRECT", cls: "badge badge--critical" };
-    }
-    if (stat.ph_score > PH_ALARM_THRESHOLD) {
-        return { label: "ZOMBIE", cls: "badge badge--critical" };
-    }
-    if (stat.dormant) {
-        return { label: "DORMANT", cls: "badge badge--high" };
-    }
-    if (stat.ph_score === 0 && stat.total_observations > 0) {
-        return { label: "OK", cls: "badge badge--ok" };
-    }
-    return { label: "WATCH", cls: "badge badge--medium" };
+function getStatus(stat: EndpointStats): { label: string; badgeClass: string } {
+    if (stat.ph_score > PH_ALARM && stat.dormant) return { label: "RESURRECT", badgeClass: "badge--critical" };
+    if (stat.ph_score > PH_ALARM)                 return { label: "ZOMBIE",    badgeClass: "badge--critical" };
+    if (stat.dormant)                              return { label: "DORMANT",   badgeClass: "badge--high"     };
+    if (stat.total_observations > 0 && stat.ph_score === 0) return { label: "HEALTHY", badgeClass: "badge--ok" };
+    return { label: "WATCH", badgeClass: "badge--accent" };
 }
 
 function PhBar({ score }: { score: number }) {
-    const pct = Math.min(100, (score / PH_BAR_MAX) * 100);
-    let fillClass = "ph-bar__fill--ok";
-    let scoreColor = "var(--color-ok)";
-    if (score > PH_ALARM_THRESHOLD) {
-        fillClass = "ph-bar__fill--danger";
-        scoreColor = "var(--color-danger)";
-    } else if (score > 10) {
-        fillClass = "ph-bar__fill--warn";
-        scoreColor = "var(--color-warning)";
-    }
-
+    const pct      = Math.min(100, (score / 30) * 100);
+    const fillClass = score > PH_ALARM ? "score-bar__fill--red" : score > 10 ? "score-bar__fill--orange" : "score-bar__fill--green";
+    const color     = score > PH_ALARM ? "var(--red)" : score > 10 ? "var(--orange)" : "var(--green)";
     return (
-        <div className="ph-bar-wrap">
-            <div className="ph-bar">
-                <div
-                    className={`ph-bar__fill ${fillClass}`}
-                    style={{ width: `${pct}%` }}
-                />
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <div className="score-bar" style={{ flex: 1, height: 4 }}>
+                <div className={`score-bar__fill ${fillClass}`} style={{ width: `${pct}%` }} />
             </div>
-            <span
-                className="ph-score-label"
-                style={{ color: scoreColor, fontWeight: score > PH_ALARM_THRESHOLD ? 700 : 400 }}
-            >
+            <span style={{ fontSize: "11px", fontFamily: "var(--mono)", color, fontWeight: score > PH_ALARM ? 700 : 500, minWidth: 32, textAlign: "right" }}>
                 {score.toFixed(1)}
             </span>
         </div>
@@ -73,7 +43,6 @@ function PhBar({ score }: { score: number }) {
 }
 
 export default function DriftTable({ stats, onSelectEndpoint, selectedEndpoint }: Props) {
-    // Sort by ph_score descending, then dormant, then alphabetical
     const sorted = [...stats].sort((a, b) => {
         if (b.ph_score !== a.ph_score) return b.ph_score - a.ph_score;
         if (a.dormant !== b.dormant) return a.dormant ? 1 : -1;
@@ -81,100 +50,79 @@ export default function DriftTable({ stats, onSelectEndpoint, selectedEndpoint }
     });
 
     return (
-        <div className="drift-panel">
-            <div className="drift-panel__header">
-                <div className="drift-panel__title-group">
-                    <div className="live-dot" title="Refreshes every 10 seconds" />
-                    <span
-                        className="panel-header__title"
-                        style={{ fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", fontSize: "0.75rem", color: "var(--color-text-muted)" }}
-                    >
-                        Endpoint Drift Monitor
-                    </span>
+        <div className="panel" style={{ height: "100%" }}>
+            {/* Header */}
+            <div className="panel-hdr">
+                <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                    <span className="panel-title">ENDPOINT DRIFT</span>
+                    <span className="badge" style={{ color: "var(--t3)", borderColor: "var(--b2)" }}>{sorted.length}</span>
                 </div>
-                <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                    <span
-                        style={{ fontSize: "0.65rem", color: "var(--color-text-muted)", fontFamily: "var(--font-mono)" }}
-                    >
-                        Page-Hinkley · λ=25
-                    </span>
-                    <span className="panel-header__count">{sorted.length}</span>
-                </div>
+                <span style={{ fontSize: "10px", color: "var(--t3)", fontFamily: "var(--mono)" }}>
+                    PH λ={PH_ALARM}
+                </span>
             </div>
 
             {sorted.length === 0 ? (
                 <div className="empty-state">
-                    <div className="empty-state__icon" style={{ fontSize: "1.5rem" }}>📡</div>
-                    <p className="empty-state__text">Waiting for sensor data…</p>
-                    <p style={{ fontSize: "0.7rem", color: "var(--color-text-dim)" }}>
-                        Data arrives when the eBPF sensor starts publishing events.
-                    </p>
+                    <span>// waiting for sensor data</span>
                 </div>
             ) : (
-                <div className="drift-table-wrap">
-                    <table className="drift-table">
-                        <thead>
+                <div style={{ overflowX: "auto", overflowY: "auto", flex: 1, minHeight: 0 }}>
+                    <table className="data-table">
+                        <thead style={{ position: "sticky", top: 0, zIndex: 1, background: "var(--s2)" }}>
                             <tr>
-                                <th>Endpoint</th>
-                                <th>Traffic</th>
-                                <th>Mean</th>
-                                <th>PH Score</th>
-                                <th>Status</th>
-                                <th>Observations</th>
+                                {["ENDPOINT", "TRAFFIC", "MEAN", "PH SCORE", "STATUS", "OBS"].map(h => (
+                                    <th key={h}>{h}</th>
+                                ))}
                             </tr>
                         </thead>
                         <tbody>
-                            {sorted.map((stat) => {
+                            {sorted.map(stat => {
                                 const isSelected = selectedEndpoint === stat.endpoint;
-                                const rowClass = getRowClass(stat, isSelected);
-                                const badge = getStatusBadge(stat);
-
+                                const isZombie   = stat.ph_score > PH_ALARM;
+                                const isDormant  = stat.dormant;
+                                const status = getStatus(stat);
+                                const rowClass = isSelected ? "row--selected" : isZombie ? "row--danger" : isDormant ? "row--warn" : "";
                                 return (
                                     <tr
                                         key={stat.endpoint}
                                         className={rowClass}
                                         onClick={() => onSelectEndpoint(stat.endpoint)}
-                                        title={`Click to highlight ${stat.endpoint} in the graph`}
+                                        title="Click to highlight in network graph"
+                                        style={{ cursor: "pointer" }}
                                     >
                                         <td
-                                            className="cell--endpoint"
                                             title={stat.endpoint}
+                                            style={{
+                                                fontFamily: "var(--mono)",
+                                                fontSize: "11px",
+                                                maxWidth: 240,
+                                                overflow: "hidden",
+                                                textOverflow: "ellipsis",
+                                                whiteSpace: "nowrap",
+                                                color: "var(--t1)",
+                                                fontWeight: isSelected ? 700 : 400,
+                                            }}
                                         >
                                             {stat.endpoint}
                                         </td>
-                                        <td style={{ color: "var(--color-text)" }}>
+                                        <td style={{ fontFamily: "var(--mono)", fontSize: "12px", textAlign: "center", color: "var(--t2)" }}>
                                             {stat.current_window}
                                         </td>
-                                        <td
-                                            style={{
-                                                color: "var(--color-text-muted)",
-                                                fontVariantNumeric: "tabular-nums",
-                                            }}
-                                        >
-                                            {stat.running_mean.toFixed(3)}
+                                        <td style={{ fontFamily: "var(--mono)", fontSize: "12px", color: "var(--t2)" }}>
+                                            {stat.running_mean.toFixed(2)}
                                         </td>
-                                        <td style={{ minWidth: 120 }}>
+                                        <td style={{ minWidth: 140 }}>
                                             <PhBar score={stat.ph_score} />
                                         </td>
                                         <td>
-                                            <span className={badge.cls}>{badge.label}</span>
+                                            <span className={`badge ${status.badgeClass}`}>{status.label}</span>
                                         </td>
-                                        <td
-                                            style={{
-                                                color: "var(--color-text-muted)",
-                                                fontVariantNumeric: "tabular-nums",
-                                            }}
-                                        >
+                                        <td style={{ fontFamily: "var(--mono)", fontSize: "12px", color: "var(--t3)" }}>
                                             {stat.total_observations}
                                             {stat.dormant && stat.dormant_windows > 0 && (
-                                                <span
-                                                    style={{
-                                                        marginLeft: "0.375rem",
-                                                        fontSize: "0.65rem",
-                                                        color: "var(--color-warning)",
-                                                    }}
-                                                >
-                                                    ({stat.dormant_windows}w idle)
+                                                <span style={{ marginLeft: 4, fontSize: "10px", color: "var(--orange)" }}>
+                                                    ({stat.dormant_windows}w)
                                                 </span>
                                             )}
                                         </td>

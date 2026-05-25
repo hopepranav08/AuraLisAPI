@@ -32,13 +32,26 @@ type mockSensor struct {
 	log       *zap.Logger
 	rdb       *redis.Client
 	drift     *DriftEngine
+	reporter  *BrainReporter
 	loopCount int // tracks how many full replay cycles have completed
 }
 
 func newMockSensor(cfg Config, log *zap.Logger) (*mockSensor, error) {
-	rdb := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr})
+	rdb := redis.NewClient(&redis.Options{
+		Addr:     cfg.RedisAddr,
+		Password: cfg.RedisPassword,
+	})
+
+	// Fail fast: verify Redis is reachable before the mock sensor starts replaying.
+	pingCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := rdb.Ping(pingCtx).Err(); err != nil {
+		return nil, fmt.Errorf("redis not reachable at %s: %w", cfg.RedisAddr, err)
+	}
+
 	drift := NewDriftEngine(DefaultDriftConfig(), log.Named("drift"))
-	return &mockSensor{cfg: cfg, log: log, rdb: rdb, drift: drift}, nil
+	reporter := NewBrainReporter(cfg, log.Named("reporter"))
+	return &mockSensor{cfg: cfg, log: log, rdb: rdb, drift: drift, reporter: reporter}, nil
 }
 
 func (s *mockSensor) Run(ctx context.Context) error {
@@ -47,8 +60,17 @@ func (s *mockSensor) Run(ctx context.Context) error {
 		zap.String("stream", s.cfg.RedisStream),
 	)
 
-	// Start the drift detection engine. It runs until ctx is cancelled,
-	// calling publishDriftAlert whenever the PH detector fires.
+	// Register with remote brain if BRAIN_URL is configured.
+	if s.cfg.BrainURL != "" {
+		s.reporter.Register(ctx)
+		s.log.Info("remote brain connection",
+			zap.String("brain_url", s.cfg.BrainURL),
+			zap.String("sensor_id", s.reporter.SensorID()),
+			zap.Bool("connected", s.reporter.Connected()),
+		)
+	}
+
+	// Start the drift detection engine.
 	go s.drift.Run(ctx, s.publishDriftAlert)
 
 	fixturePath := filepath.Join(s.cfg.FixturesDir, "events.jsonl")
@@ -60,12 +82,30 @@ func (s *mockSensor) Run(ctx context.Context) error {
 		}
 		s.loopCount++
 
-		// After 5 complete replay loops, inject the zombie burst exactly once.
-		// This simulates an attacker probing a dormant API endpoint after
-		// observing zero traffic to it for several drift windows.
-		if s.loopCount >= 5 && !zombieBurstFired {
+		// After 2 complete replay loops, wait 35 more seconds. This guarantees
+		// MinDormantWins=3 consecutive 10s windows with zero legacy-payments traffic
+		// before the zombie burst, so the drift engine marks the endpoint dormant.
+		//
+		// Timeline (25 fixture events × 100ms = ~2.5s/loop):
+		//   Loop 0 (0–2.5s)  → /api/v1/legacy-payments observed 3× (drift state created)
+		//   Loop 1 (4.5–7s)  → /api/v1/legacy-payments observed 3× more
+		//   t=10s  tick 1    → count=6, dormCnt=0  (traffic present)
+		//   t=20s  tick 2    → count=0, dormCnt=1
+		//   t=30s  tick 3    → count=0, dormCnt=2
+		//   t=40s  tick 4    → count=0, dormCnt=3 → dormant=true ✓
+		//   t=42s  burst     → 20 events published to drift engine
+		//   t=50s  tick 5    → count=20, wasDormant=true → "resurrection" alarm ✓
+		if s.loopCount >= 2 && !zombieBurstFired {
 			zombieBurstFired = true
-			s.log.Info("zombie burst trigger: injecting reconnaissance traffic",
+			s.log.Info("waiting 35s for dormancy to establish before zombie burst",
+				zap.Int("loop_count", s.loopCount),
+			)
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(35 * time.Second):
+			}
+			s.log.Info("zombie burst trigger: injecting resurrection traffic",
 				zap.Int("loop_count", s.loopCount),
 			)
 			if err := s.injectZombieBurst(ctx); err != nil {
@@ -77,10 +117,11 @@ func (s *mockSensor) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-time.After(5 * time.Second):
+		case <-time.After(2 * time.Second):
 		}
 	}
 }
+
 
 // replayFile reads events.jsonl line by line, injects current timestamps,
 // publishes each to Redis, and observes each path in the drift engine.
@@ -105,7 +146,7 @@ func (s *mockSensor) replayFile(ctx context.Context, path string) error {
 		}
 
 		// Validate JSON and extract fields.
-		var raw map[string]interface{}
+		var raw map[string]any
 		if err := json.Unmarshal([]byte(line), &raw); err != nil {
 			s.log.Warn("skipping malformed fixture line", zap.String("line", line))
 			continue
@@ -113,15 +154,22 @@ func (s *mockSensor) replayFile(ctx context.Context, path string) error {
 
 		// Inject current timestamp before publishing.
 		raw["timestamp_ns"] = time.Now().UnixNano()
-		payload, _ := json.Marshal(raw)
+		payload, err := json.Marshal(raw)
+		if err != nil {
+			s.log.Warn("fixture marshal failed", zap.Error(err))
+			continue
+		}
 
 		if err := s.rdb.XAdd(ctx, &redis.XAddArgs{
 			Stream: s.cfg.RedisStream,
-			Values: map[string]interface{}{"data": string(payload)},
+			Values: map[string]any{"data": string(payload)},
 		}).Err(); err != nil {
 			s.log.Error("redis publish failed", zap.Error(err))
 			continue
 		}
+
+		// Forward to remote brain if configured (company install mode).
+		s.reporter.Report(ctx, payload)
 
 		// Extract path for drift observation.
 		if pathVal, ok := raw["path"].(string); ok && pathVal != "" {
@@ -159,7 +207,7 @@ func (s *mockSensor) injectZombieBurst(ctx context.Context) error {
 
 	s.log.Info("injecting zombie burst", zap.Int("events", 20))
 
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		select {
 		case <-ctx.Done():
 			return nil
@@ -170,20 +218,24 @@ func (s *mockSensor) injectZombieBurst(ctx context.Context) error {
 		method := methods[rand.Intn(len(methods))]
 		path := paths[rand.Intn(len(paths))]
 
-		evt := map[string]interface{}{
+		evt := map[string]any{
 			"method":       method,
 			"path":         path,
 			"status_code":  200,
-			"pid":          9999,
+			"pid":          9000 + i,
 			"source":       "plain",
-			"direction":    "egress",
+			"direction":    "ingress", // attacker inbound traffic — not egress
 			"timestamp_ns": time.Now().UnixNano(),
 		}
-		payload, _ := json.Marshal(evt)
+		payload, err := json.Marshal(evt)
+		if err != nil {
+			s.log.Warn("zombie burst marshal failed", zap.Error(err))
+			continue
+		}
 
 		if err := s.rdb.XAdd(ctx, &redis.XAddArgs{
 			Stream: s.cfg.RedisStream,
-			Values: map[string]interface{}{"data": string(payload)},
+			Values: map[string]any{"data": string(payload)},
 		}).Err(); err != nil {
 			s.log.Error("zombie burst redis publish failed", zap.Error(err))
 		}
@@ -220,9 +272,12 @@ func (s *mockSensor) publishDriftAlert(ctx context.Context, alert DriftAlert) er
 		zap.Float64("ph_score", alert.PHScore),
 	)
 
+	// Forward alert to remote brain if configured.
+	s.reporter.ReportAlert(ctx, alert)
+
 	return s.rdb.XAdd(ctx, &redis.XAddArgs{
 		Stream: s.cfg.RedisStream,
-		Values: map[string]interface{}{"data": string(payload)},
+		Values: map[string]any{"data": string(payload)},
 	}).Err()
 }
 

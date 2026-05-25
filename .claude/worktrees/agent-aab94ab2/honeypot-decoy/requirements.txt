@@ -1,0 +1,11 @@
+
+# honeypot-decoy — OpenCanary + Redis event forwarding
+
+# OpenCanary honeypot daemon
+opencanary==0.9.3
+
+# Redis client for forwarding honeypot events to auralis:honeypot-events stream
+redis==5.2.0
+
+# HTTP requests used by optional alerting integrations
+requests==2.31.0

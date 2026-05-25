@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
@@ -68,11 +69,15 @@ func FindGoTLSSymbols(binaryPath string) (writeAddr, readAddr uint64, err error)
 		return 0, 0, fmt.Errorf("%s: missing %s section — not a Go binary", binaryPath, gopclntabSection)
 	}
 
-	// Walk the symbol table. elf.File.Symbols() returns ([]elf.Symbol, error);
-	// a missing symbol table returns an error wrapping elf.ErrNoSymbols.
+	// Walk the symbol table. elf.File.Symbols() reads .symtab (present in
+	// non-stripped binaries). Stripped Go binaries lose .symtab but may still
+	// export symbols via .dynsym — try that as a fallback before giving up.
 	symbols, err := f.Symbols()
 	if err != nil {
-		return 0, 0, fmt.Errorf("reading ELF symbols from %s: %w", binaryPath, err)
+		symbols, err = f.DynamicSymbols()
+		if err != nil {
+			return 0, 0, fmt.Errorf("reading ELF symbols from %s: %w", binaryPath, err)
+		}
 	}
 
 	for _, sym := range symbols {
@@ -95,47 +100,52 @@ func FindGoTLSSymbols(binaryPath string) (writeAddr, readAddr uint64, err error)
 	return writeAddr, readAddr, nil
 }
 
-// findGoTLSBinary finds a suitable Go binary to hook for crypto/tls traffic.
+// findGoTLSBinary finds a suitable Go binary to hook for crypto/tls traffic
+// and returns its path together with the resolved symbol addresses.
 //
 // Resolution order:
 //  1. GOTLS_BINARY_PATH env var — operator-specified binary takes priority.
 //  2. Walk /proc/*/exe — find any running process whose main executable is a
 //     Go binary that exports the required crypto/tls symbols.
 //
-// Returns the path to the first viable binary, or an error if none is found.
+// Returning addresses here avoids calling FindGoTLSSymbols twice (once for
+// validation and once for address resolution in RunGoTLSPrograms).
 // Skips non-numeric /proc entries and broken symlinks without logging noise.
-func findGoTLSBinary(log *zap.Logger) (string, error) {
+func findGoTLSBinary(log *zap.Logger) (path string, writeAddr, readAddr uint64, err error) {
 	// 1. Operator override.
 	if override := os.Getenv("GOTLS_BINARY_PATH"); override != "" {
 		log.Info("using GOTLS_BINARY_PATH override", zap.String("path", override))
-		if _, _, err := FindGoTLSSymbols(override); err != nil {
-			return "", fmt.Errorf("GOTLS_BINARY_PATH %s: %w", override, err)
+		w, r, symErr := FindGoTLSSymbols(override)
+		if symErr != nil {
+			return "", 0, 0, fmt.Errorf("GOTLS_BINARY_PATH %s: %w", override, symErr)
 		}
-		return override, nil
+		return override, w, r, nil
 	}
 
 	// 2. Auto-discover running Go processes from /proc.
-	entries, err := os.ReadDir("/proc")
-	if err != nil {
-		return "", fmt.Errorf("reading /proc: %w", err)
+	entries, readErr := os.ReadDir("/proc")
+	if readErr != nil {
+		return "", 0, 0, fmt.Errorf("reading /proc: %w", readErr)
 	}
+
+	// Resolve once — avoids a redundant syscall on every loop iteration.
+	selfExe, _ := os.Readlink("/proc/self/exe")
 
 	for _, entry := range entries {
 		// Only numeric entries correspond to process directories.
-		if _, err := strconv.Atoi(entry.Name()); err != nil {
+		if _, atoiErr := strconv.Atoi(entry.Name()); atoiErr != nil {
 			continue
 		}
 
 		exePath := filepath.Join("/proc", entry.Name(), "exe")
-		target, err := os.Readlink(exePath)
-		if err != nil {
+		target, linkErr := os.Readlink(exePath)
+		if linkErr != nil {
 			// Process may have exited between ReadDir and Readlink — ignore.
 			continue
 		}
 
 		// Deduplicate: skip the current binary (this sensor process) to avoid
 		// self-uprobing, which would generate recursive events.
-		selfExe, _ := os.Readlink("/proc/self/exe")
 		if target == selfExe {
 			continue
 		}
@@ -145,8 +155,8 @@ func findGoTLSBinary(log *zap.Logger) (string, error) {
 			continue
 		}
 
-		_, _, err = FindGoTLSSymbols(target)
-		if err != nil {
+		w, r, symErr := FindGoTLSSymbols(target)
+		if symErr != nil {
 			// Not a Go binary or missing symbols — try next process.
 			continue
 		}
@@ -155,10 +165,10 @@ func findGoTLSBinary(log *zap.Logger) (string, error) {
 			zap.String("pid", entry.Name()),
 			zap.String("exe", target),
 		)
-		return target, nil
+		return target, w, r, nil
 	}
 
-	return "", fmt.Errorf("no running Go binary with crypto/tls symbols found in /proc")
+	return "", 0, 0, fmt.Errorf("no running Go binary with crypto/tls symbols found in /proc")
 }
 
 // RunGoTLSPrograms loads the bpf2go-generated GoTlsObjects, attaches uprobes
@@ -171,17 +181,10 @@ func findGoTLSBinary(log *zap.Logger) (string, error) {
 func (s *liveSensor) RunGoTLSPrograms(ctx context.Context) {
 	log := s.log.Named("gotls")
 
-	// Locate a suitable Go binary. This is best-effort.
-	binaryPath, err := findGoTLSBinary(log)
+	// Locate a suitable Go binary and resolve symbol addresses in one pass.
+	binaryPath, writeAddr, readAddr, err := findGoTLSBinary(log)
 	if err != nil {
 		log.Warn("Go TLS uprobes disabled — no target binary found", zap.Error(err))
-		return
-	}
-
-	// Pre-compute symbol addresses for fallback (in case name-based lookup fails).
-	writeAddr, readAddr, err := FindGoTLSSymbols(binaryPath)
-	if err != nil {
-		log.Warn("failed to read Go TLS symbol addresses", zap.Error(err))
 		return
 	}
 
@@ -277,7 +280,9 @@ func (s *liveSensor) RunGoTLSPrograms(ctx context.Context) {
 		log.Error("failed to open GoTls ring buffer", zap.Error(err))
 		return
 	}
-	defer rd.Close()
+	var rdOnce sync.Once
+	closeRd := func() { rdOnce.Do(func() { rd.Close() }) }
+	defer closeRd()
 
 	log.Info("GoTls ring buffer open — streaming Go TLS events to Redis",
 		zap.String("stream", s.cfg.RedisStream),
@@ -285,7 +290,7 @@ func (s *liveSensor) RunGoTLSPrograms(ctx context.Context) {
 
 	go func() {
 		<-ctx.Done()
-		rd.Close()
+		closeRd()
 	}()
 
 	for {
