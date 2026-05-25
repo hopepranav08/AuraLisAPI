@@ -334,6 +334,106 @@ html, body {
 .text-muted   { color: var(--t2); }
 .text-ghost   { color: var(--t3); }
 
+/* ── Dashboard responsive grid layout ─────────────────────────────────── */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  border-bottom: 1px solid var(--b1);
+}
+.main-grid {
+  display: grid;
+  grid-template-columns: 60fr 40fr;
+}
+.bottom-grid {
+  display: grid;
+  grid-template-columns: 65fr 35fr;
+  height: 360px;
+}
+
+@media (max-width: 900px) {
+  .stat-grid      { grid-template-columns: repeat(3, 1fr); }
+  .main-grid      { grid-template-columns: 1fr; }
+  .main-grid > *  { height: 340px !important; }
+  .bottom-grid    { grid-template-columns: 1fr; height: auto; }
+  .bottom-grid > * { height: 280px; }
+}
+
+@media (max-width: 600px) {
+  .stat-grid      { grid-template-columns: repeat(2, 1fr); }
+  .dash-nav-extra { display: none; }  /* hides Attack Arena + Logout on small screens */
+}
+
+/* ── Skeleton loading bar ──────────────────────────────────────────────── */
+@keyframes skeleton-pulse {
+  0%, 100% { opacity: .4; }
+  50%       { opacity: 1;  }
+}
+.skeleton-bar {
+  display: inline-block;
+  width: 56px;
+  height: 30px;
+  background: var(--b2);
+  border-radius: 0;
+  animation: skeleton-pulse 1.4s ease-in-out infinite;
+  vertical-align: middle;
+}
+
+/* ── Error reconnecting badge ──────────────────────────────────────────── */
+.reconnect-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--orange);
+  border: 1px solid var(--orange);
+  background: var(--orange-bg);
+  padding: 2px 8px;
+  letter-spacing: 0.06em;
+  animation: pulse-ok 2s infinite;
+}
+
+/* ── Notes textarea ────────────────────────────────────────────────────── */
+.notes-input {
+  width: 100%;
+  background: var(--s2);
+  border: 1px solid var(--b2);
+  color: var(--t2);
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 6px 8px;
+  resize: none;
+  outline: none;
+  border-radius: 0;
+  transition: border-color 0.12s;
+  box-sizing: border-box;
+}
+.notes-input:focus { border-color: var(--t1); color: var(--t1); }
+.notes-input::placeholder { color: var(--t3); }
+
+/* ── Stat card v2 (dashboard) ──────────────────────────────────────────── */
+.stat-card-v2 {
+  padding: 20px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  position: relative;
+}
+.stat-card-v2::before {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+.stat-card-v2.accent-lime::before   { background: var(--accent); }
+.stat-card-v2.accent-red::before    { background: var(--red); }
+.stat-card-v2.accent-orange::before { background: var(--orange); }
+.stat-card-v2.accent-purple::before { background: var(--purple); }
+
 /* ── Keyframes ─────────────────────────────────────────────────────────── */
 @keyframes blink {
   0%, 100% { opacity: 1; }

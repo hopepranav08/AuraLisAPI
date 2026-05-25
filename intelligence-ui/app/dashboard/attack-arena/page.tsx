@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { AuthGuard } from "../../components/AuthGuard";
+// AuthGuard is applied by dashboard/layout.tsx — no per-page import needed.
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -634,9 +634,5 @@ function AttackArenaInner() {
 }
 
 export default function AttackArenaPage() {
-    return (
-        <AuthGuard>
-            <AttackArenaInner />
-        </AuthGuard>
-    );
+    return <AttackArenaInner />;
 }

@@ -22,11 +22,14 @@ export interface Incident {
 
 interface Props {
     incidents: Incident[];
-    onApprove: (id: string) => Promise<void>;
-    onReject: (id: string) => Promise<void>;
+    onApprove: (id: string, notes?: string) => Promise<void>;
+    onReject: (id: string, notes?: string) => Promise<void>;
     loadingId: string | null;
     selectedEndpoint: string | null;
     onViewDetail: (threadId: string) => void;
+    // 5.1 — error state from parent polling
+    fetchError?: boolean;
+    secsAgo?: number | null;
 }
 
 function classificationColor(cls: string | null): string {
@@ -53,51 +56,45 @@ function SevBadge({ sev }: { sev: string | null }) {
     return <span className={`badge ${cls}`}>{sev}</span>;
 }
 
+function formatSecsAgo(secs: number): string {
+    if (secs < 60) return `${secs}s ago`;
+    return `${Math.floor(secs / 60)}m ${secs % 60}s ago`;
+}
+
 // ── IncidentCard ──────────────────────────────────────────────────────────────
-// Each card manages its own action state (approving | rejecting | idle)
-// so that clicking Approve shows a spinner ONLY on the approve button,
-// not on reject — and vice versa. The parent `loadingId` prop still gates
-// other cards from firing while any action is in-flight.
 
 function IncidentCard({ incident, onApprove, onReject, loadingId, selectedEndpoint, onViewDetail }: {
     incident: Incident;
-    onApprove: (id: string) => Promise<void>;
-    onReject: (id: string) => Promise<void>;
+    onApprove: (id: string, notes?: string) => Promise<void>;
+    onReject: (id: string, notes?: string) => Promise<void>;
     loadingId: string | null;
     selectedEndpoint: string | null;
     onViewDetail: (threadId: string) => void;
 }) {
-    const [expanded,    setExpanded]    = useState(false);
-    // "approving" | "rejecting" | null — tracks WHICH button on THIS card is active
-    const [actionType,  setActionType]  = useState<"approving" | "rejecting" | null>(null);
+    const [expanded,   setExpanded]   = useState(false);
+    const [actionType, setActionType] = useState<"approving" | "rejecting" | null>(null);
+    // 5.4 — optional notes for approve/reject
+    const [notes,      setNotes]      = useState("");
 
     const isThisCardLoading = loadingId === incident.thread_id;
     const isAwaiting        = incident.status === "awaiting_approval";
     const isSelected        = selectedEndpoint === incident.endpoint;
     const clsColor          = classificationColor(incident.classification);
-
-    // Any card with a different thread_id should be disabled while a sibling is loading
-    const isDisabled = loadingId !== null && loadingId !== incident.thread_id;
+    const isDisabled        = loadingId !== null && loadingId !== incident.thread_id;
 
     const handleApprove = useCallback(async () => {
         if (isThisCardLoading || isDisabled) return;
         setActionType("approving");
-        try {
-            await onApprove(incident.thread_id);
-        } finally {
-            setActionType(null);
-        }
-    }, [isThisCardLoading, isDisabled, onApprove, incident.thread_id]);
+        try { await onApprove(incident.thread_id, notes); }
+        finally { setActionType(null); }
+    }, [isThisCardLoading, isDisabled, onApprove, incident.thread_id, notes]);
 
     const handleReject = useCallback(async () => {
         if (isThisCardLoading || isDisabled) return;
         setActionType("rejecting");
-        try {
-            await onReject(incident.thread_id);
-        } finally {
-            setActionType(null);
-        }
-    }, [isThisCardLoading, isDisabled, onReject, incident.thread_id]);
+        try { await onReject(incident.thread_id, notes); }
+        finally { setActionType(null); }
+    }, [isThisCardLoading, isDisabled, onReject, incident.thread_id, notes]);
 
     return (
         <div style={{
@@ -131,38 +128,49 @@ function IncidentCard({ incident, onApprove, onReject, loadingId, selectedEndpoi
                 <ClassBadge cls={incident.classification} />
                 <SevBadge sev={incident.severity} />
                 {incident.is_pii_exposed && <span className="badge badge--critical">PII</span>}
-                {!isAwaiting && <span className="badge badge--ok">RESOLVED</span>}
+                {!isAwaiting && incident.status !== "awaiting_approval" && (
+                    <span className="badge badge--ok">{incident.status.toUpperCase()}</span>
+                )}
             </div>
 
-            {/* Approve / Reject — each button tracks its own loading independently */}
+            {/* 5.4 — notes textarea + Approve / Reject buttons */}
             {isAwaiting && (
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px", marginBottom: "8px" }}>
-                    {/* APPROVE button */}
-                    <button
-                        disabled={isThisCardLoading || isDisabled}
-                        onClick={handleApprove}
-                        className={`btn btn--green btn--sm incident-action-btn${actionType === "approving" ? " incident-action-btn--active" : ""}`}
-                        style={{ justifyContent: "center", width: "100%", borderRadius: 0 }}
-                        title="Approve: triggers KrakenD 410 enforcement + GitHub PR"
-                    >
-                        {actionType === "approving" ? (
-                            <><span className="spinner" style={{ width: 10, height: 10 }} />approving…</>
-                        ) : "// APPROVE + ENFORCE"}
-                    </button>
-
-                    {/* REJECT button — spinner ONLY when rejecting, never when approving */}
-                    <button
-                        disabled={isThisCardLoading || isDisabled}
-                        onClick={handleReject}
-                        className={`btn btn--red btn--sm incident-action-btn${actionType === "rejecting" ? " incident-action-btn--active" : ""}`}
-                        style={{ justifyContent: "center", width: "100%", borderRadius: 0 }}
-                        title="Reject: generate report only, no gateway changes"
-                    >
-                        {actionType === "rejecting" ? (
-                            <><span className="spinner" style={{ width: 10, height: 10 }} />rejecting…</>
-                        ) : "// REJECT"}
-                    </button>
-                </div>
+                <>
+                    <textarea
+                        className="notes-input"
+                        value={notes}
+                        onChange={e => setNotes(e.target.value)}
+                        placeholder="Notes (optional)…"
+                        rows={2}
+                        style={{ marginBottom: "8px" }}
+                    />
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px", marginBottom: "8px" }}>
+                        <button
+                            disabled={isThisCardLoading || isDisabled}
+                            onClick={handleApprove}
+                            className={`btn btn--green btn--sm incident-action-btn${actionType === "approving" ? " incident-action-btn--active" : ""}`}
+                            style={{ justifyContent: "center", width: "100%", borderRadius: 0 }}
+                            title="Approve: triggers KrakenD 410 enforcement + GitHub PR"
+                        >
+                            {actionType === "approving"
+                                ? <><span className="spinner" style={{ width: 10, height: 10 }} />approving…</>
+                                : "// APPROVE + ENFORCE"
+                            }
+                        </button>
+                        <button
+                            disabled={isThisCardLoading || isDisabled}
+                            onClick={handleReject}
+                            className={`btn btn--red btn--sm incident-action-btn${actionType === "rejecting" ? " incident-action-btn--active" : ""}`}
+                            style={{ justifyContent: "center", width: "100%", borderRadius: 0 }}
+                            title="Reject: generate report only, no gateway changes"
+                        >
+                            {actionType === "rejecting"
+                                ? <><span className="spinner" style={{ width: 10, height: 10 }} />rejecting…</>
+                                : "// REJECT"
+                            }
+                        </button>
+                    </div>
+                </>
             )}
 
             {/* GitHub PR link */}
@@ -176,9 +184,7 @@ function IncidentCard({ incident, onApprove, onReject, loadingId, selectedEndpoi
             {/* AI Report — collapsible */}
             {!isAwaiting && incident.report_summary && (
                 <div>
-                    <button onClick={() => setExpanded(v => !v)}
-                        className="btn btn--sm"
-                        style={{ marginBottom: expanded ? "6px" : 0 }}>
+                    <button onClick={() => setExpanded(v => !v)} className="btn btn--sm" style={{ marginBottom: expanded ? "6px" : 0 }}>
                         {expanded ? "▾" : "▸"} AI REPORT
                     </button>
                     {expanded && (
@@ -204,11 +210,7 @@ function IncidentCard({ incident, onApprove, onReject, loadingId, selectedEndpoi
                 <span style={{ fontSize: "10px", color: "var(--t3)", fontFamily: "var(--mono)" }}>
                     // {incident.thread_id.slice(0, 16)}
                 </span>
-                <button
-                    onClick={() => onViewDetail(incident.thread_id)}
-                    className="btn btn--sm"
-                    style={{ fontSize: "10px", padding: "1px 6px" }}
-                >
+                <button onClick={() => onViewDetail(incident.thread_id)} className="btn btn--sm" style={{ fontSize: "10px", padding: "1px 6px" }}>
                     // DETAILS →
                 </button>
             </div>
@@ -216,7 +218,7 @@ function IncidentCard({ incident, onApprove, onReject, loadingId, selectedEndpoi
     );
 }
 
-export default function IncidentPanel({ incidents, onApprove, onReject, loadingId, selectedEndpoint, onViewDetail }: Props) {
+export default function IncidentPanel({ incidents, onApprove, onReject, loadingId, selectedEndpoint, onViewDetail, fetchError, secsAgo }: Props) {
     const sorted = [...incidents].sort((a, b) => {
         if (a.status === "awaiting_approval" && b.status !== "awaiting_approval") return -1;
         if (a.status !== "awaiting_approval" && b.status === "awaiting_approval") return 1;
@@ -236,10 +238,18 @@ export default function IncidentPanel({ incidents, onApprove, onReject, loadingI
                 <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
                     <span className="panel-title">INCIDENTS</span>
                     <span className="badge" style={{ color: "var(--t3)", borderColor: "var(--b2)" }}>{incidents.length}</span>
+                    {/* 5.1 — reconnecting badge in panel header */}
+                    {fetchError && <span className="reconnect-badge">⚠ Reconnecting…</span>}
                 </div>
-                {awaiting > 0 && (
-                    <span className="badge badge--high">{awaiting} PENDING</span>
-                )}
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    {awaiting > 0 && <span className="badge badge--high">{awaiting} PENDING</span>}
+                    {/* 5.1 — last updated in panel header */}
+                    {secsAgo !== null && secsAgo !== undefined && !fetchError && (
+                        <span style={{ fontSize: "10px", color: "var(--t3)", fontFamily: "var(--mono)" }}>
+                            {formatSecsAgo(secsAgo)}
+                        </span>
+                    )}
+                </div>
             </div>
 
             {/* List */}
