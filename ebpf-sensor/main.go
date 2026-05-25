@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -70,12 +71,15 @@ func main() {
 	defer log.Sync() //nolint:errcheck
 
 	// ── Configuration ─────────────────────────────────────────────────────────
+	replayDelayMs, _ := strconv.Atoi(getEnv("REPLAY_DELAY_MS", "100"))
+
 	cfg := sensor.Config{
 		Mode:          getEnv("SENSOR_MODE", "mock"),
 		RedisAddr:     getEnv("REDIS_ADDR", "127.0.0.1:6379"),
 		RedisPassword: getEnv("REDIS_PASSWORD", ""), // empty = no auth (dev default)
 		RedisStream:   getEnv("REDIS_STREAM", "auralis:events"),
 		FixturesDir:   getEnv("FIXTURES_DIR", "./fixtures"),
+		ReplayDelayMs: replayDelayMs,                // inter-event delay in mock mode
 		BrainURL:      getEnv("BRAIN_URL", ""),      // e.g. "https://auralisapi.dev" — company install mode
 		CompanyToken:  getEnv("COMPANY_TOKEN", ""),  // Bearer token from onboarding
 		SensorID:      getEnv("SENSOR_ID", ""),      // auto-generated from hostname if empty
@@ -120,6 +124,12 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+
+	// GET /metrics — Prometheus text-format 0.0.4 counter exposition.
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		_, _ = w.Write([]byte(sensor.PrometheusMetrics()))
 	})
 
 	srv := &http.Server{

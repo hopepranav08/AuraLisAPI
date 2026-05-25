@@ -17,6 +17,9 @@ type Config struct {
 	RedisStream   string
 	FixturesDir   string
 
+	// Mock-mode tuning
+	ReplayDelayMs int // inter-event delay during fixture replay (default 100ms)
+
 	// Remote brain connection (company install mode).
 	// When BrainURL is set the sensor registers itself and forwards events
 	// to the hosted brain via HTTP in addition to local Redis.
