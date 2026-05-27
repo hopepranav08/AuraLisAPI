@@ -1,4 +1,4 @@
-'use client';
+﻿'use client';
 import React, { useState } from 'react';
 import Link from 'next/link';
 
@@ -15,7 +15,7 @@ function CopyBtn({ text }: { text: string }) {
             style={{
                 background: 'none',
                 border: '1px solid #444',
-                color: copied ? '#6bde00' : '#888',
+                color: copied ? '#4afa7a' : '#888',
                 fontFamily: "'JetBrains Mono', monospace",
                 fontSize: '11px',
                 padding: '3px 8px',
@@ -94,7 +94,7 @@ export default function InstallPage() {
                     fontFamily: "'Space Grotesk', sans-serif",
                     fontWeight: 800,
                     fontSize: '1.125rem',
-                    color: '#b8ff00',
+                    color: '#4afa7a',
                     textDecoration: 'none',
                     letterSpacing: '-0.01em',
                 }}>
@@ -103,7 +103,7 @@ export default function InstallPage() {
 
                 <div style={{ display: 'flex', alignItems: 'center', gap: '1.5rem' }}>
                     <Link href="/dashboard" style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: '0.75rem', color: 'var(--t2, #888)', textDecoration: 'none', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Dashboard</Link>
-                    <Link href="/install" style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: '0.75rem', color: '#b8ff00', textDecoration: 'none', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Install</Link>
+                    <Link href="/install" style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: '0.75rem', color: '#4afa7a', textDecoration: 'none', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Install</Link>
                     <Link href="/dashboard/attack-arena" style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: '0.75rem', color: 'var(--t2, #888)', textDecoration: 'none', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Attack Arena</Link>
                 </div>
 
@@ -124,7 +124,7 @@ export default function InstallPage() {
                         fontFamily: "'Space Grotesk', sans-serif",
                         fontSize: '0.75rem',
                         color: '#0c0c0c',
-                        background: '#b8ff00',
+                        background: '#4afa7a',
                         textDecoration: 'none',
                         padding: '6px 14px',
                         fontWeight: 800,
@@ -149,12 +149,12 @@ export default function InstallPage() {
                     <div style={{
                         display: 'inline-flex', alignItems: 'center', gap: '0.5rem',
                         padding: '4px 12px',
-                        border: '2px solid #b8ff00',
+                        border: '2px solid #4afa7a',
                         fontFamily: "'JetBrains Mono', monospace",
                         fontSize: '0.75rem',
                         fontWeight: 700,
                         marginBottom: '1.5rem',
-                        background: '#b8ff00',
+                        background: '#4afa7a',
                         color: '#0c0c0c',
                     }}>
                         // sensor v1.0 · 12MB Go binary
@@ -168,7 +168,7 @@ export default function InstallPage() {
                         margin: '0 0 1.25rem',
                         color: 'var(--t1, #f0f0f0)',
                     }}>
-                        Deploy in <span style={{ background: '#b8ff00', color: '#0c0c0c', padding: '0 6px' }}>60 seconds</span>
+                        Deploy in <span style={{ background: '#4afa7a', color: '#0c0c0c', padding: '0 6px' }}>60 seconds</span>
                     </h1>
                     <p style={{
                         fontFamily: "'JetBrains Mono', monospace",
@@ -209,12 +209,12 @@ export default function InstallPage() {
                                 border: '1px solid var(--b2, #2a2a2a)',
                                 background: 'var(--s1, #111)',
                                 padding: '1.25rem',
-                                borderTop: '3px solid #b8ff00',
+                                borderTop: '3px solid #4afa7a',
                             }}>
                                 <div style={{
                                     display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
                                     width: 36, height: 36,
-                                    background: '#b8ff00',
+                                    background: '#4afa7a',
                                     color: '#0c0c0c',
                                     fontFamily: "'JetBrains Mono', monospace",
                                     fontWeight: 900,
@@ -238,7 +238,7 @@ export default function InstallPage() {
                             onClick={() => setTab(t)}
                             style={{
                                 padding: '0.75rem 1.5rem',
-                                background: tab === t ? '#b8ff00' : 'transparent',
+                                background: tab === t ? '#4afa7a' : 'transparent',
                                 border: 'none',
                                 borderRight: '1px solid var(--b2, #2a2a2a)',
                                 color: tab === t ? '#0c0c0c' : 'var(--t3, #555)',
@@ -277,7 +277,7 @@ export default function InstallPage() {
                             <Link href="/dashboard" style={{
                                 display: 'inline-block', marginTop: '1rem',
                                 padding: '10px 20px',
-                                background: '#6bde00',
+                                background: '#4afa7a',
                                 border: '2px solid var(--t1, #0f0f0f)',
                                 boxShadow: '3px 3px 0 var(--t1, #0f0f0f)',
                                 fontFamily: "'JetBrains Mono', monospace",
@@ -300,7 +300,7 @@ export default function InstallPage() {
                         </Step>
 
                         <Step num={2} title="Configure environment">
-                            <p style={pStyle}>Copy the example env file and fill in your API keys. Only <code style={{ fontFamily: "'JetBrains Mono', monospace", background: 'var(--s3, #1e1e1e)', color: '#b8ff00', padding: '1px 5px' }}>ANTHROPIC_API_KEY</code> is required for AI features.</p>
+                            <p style={pStyle}>Copy the example env file and fill in your API keys. Only <code style={{ fontFamily: "'JetBrains Mono', monospace", background: 'var(--s3, #1e1e1e)', color: '#4afa7a', padding: '1px 5px' }}>ANTHROPIC_API_KEY</code> is required for AI features.</p>
                             <CodeBlock
                                 label="bash"
                                 code={`cp .env.example .env
@@ -331,10 +331,10 @@ GITHUB_REPO=yourorg/yourrepo`}
                                         border: '1px solid var(--b2, #2a2a2a)',
                                         background: 'var(--s1, #111)',
                                         padding: '1rem',
-                                        borderLeft: '3px solid #b8ff00',
+                                        borderLeft: '3px solid #4afa7a',
                                     }}>
                                         <div style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: '0.7rem', marginBottom: '0.375rem', textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--t3, #555)' }}>{s.name}</div>
-                                        <code style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: '0.75rem', color: '#b8ff00' }}>{s.url}</code>
+                                        <code style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: '0.75rem', color: '#4afa7a' }}>{s.url}</code>
                                     </div>
                                 ))}
                             </div>
@@ -346,7 +346,7 @@ GITHUB_REPO=yourorg/yourrepo`}
                 <div style={{
                     marginTop: '3rem',
                     border: '1px solid var(--b2, #2a2a2a)',
-                    borderTop: '3px solid #b8ff00',
+                    borderTop: '3px solid #4afa7a',
                     background: 'var(--s1, #111)',
                 }}>
                     <div style={{
@@ -358,7 +358,7 @@ GITHUB_REPO=yourorg/yourrepo`}
                         display: 'flex', alignItems: 'center', gap: '0.75rem',
                         color: 'var(--t1, #f0f0f0)',
                     }}>
-                        <span style={{ background: '#b8ff00', color: '#0c0c0c', padding: '2px 8px', fontSize: '0.75rem', fontWeight: 900 }}>K8S</span>
+                        <span style={{ background: '#4afa7a', color: '#0c0c0c', padding: '2px 8px', fontSize: '0.75rem', fontWeight: 900 }}>K8S</span>
                         Kubernetes DaemonSet
                     </div>
                     <div style={{ padding: '1.5rem' }}>
@@ -395,7 +395,7 @@ kubectl apply -f https://auralisapi.dev/k8s/daemonset.yaml`}
                         fontSize: '0.8125rem',
                     }}>
                         <thead>
-                            <tr style={{ background: 'var(--s2, #161616)', borderBottom: '2px solid #b8ff00' }}>
+                            <tr style={{ background: 'var(--s2, #161616)', borderBottom: '2px solid #4afa7a' }}>
                                 <th style={{ padding: '10px 14px', textAlign: 'left', fontWeight: 700, whiteSpace: 'nowrap', color: 'var(--t3, #555)', letterSpacing: '0.1em', fontSize: '0.7rem' }}>VARIABLE</th>
                                 <th style={{ padding: '10px 14px', textAlign: 'left', fontWeight: 700, whiteSpace: 'nowrap', color: 'var(--t3, #555)', letterSpacing: '0.1em', fontSize: '0.7rem' }}>DEFAULT</th>
                                 <th style={{ padding: '10px 14px', textAlign: 'left', fontWeight: 700, color: 'var(--t3, #555)', letterSpacing: '0.1em', fontSize: '0.7rem' }}>DESCRIPTION</th>
@@ -404,7 +404,7 @@ kubectl apply -f https://auralisapi.dev/k8s/daemonset.yaml`}
                         <tbody>
                             {ENV_VARS.map((v, i) => (
                                 <tr key={v.name} style={{ background: i % 2 === 0 ? 'var(--s1, #111)' : 'var(--bg, #0c0c0c)', borderTop: '1px solid var(--b1, #1e1e1e)' }}>
-                                    <td style={{ padding: '10px 14px', fontWeight: 700, color: '#b8ff00', whiteSpace: 'nowrap' }}>{v.name}</td>
+                                    <td style={{ padding: '10px 14px', fontWeight: 700, color: '#4afa7a', whiteSpace: 'nowrap' }}>{v.name}</td>
                                     <td style={{ padding: '10px 14px', color: 'var(--t3, #555)', background: 'var(--s2, #161616)', whiteSpace: 'nowrap' }}>{v.default}</td>
                                     <td style={{ padding: '10px 14px', color: 'var(--t2, #888)', lineHeight: 1.5 }}>{v.desc}</td>
                                 </tr>
@@ -458,7 +458,7 @@ kubectl apply -f https://auralisapi.dev/k8s/daemonset.yaml`}
                 gap: '1rem',
                 background: 'var(--bg, #0c0c0c)',
             }}>
-                <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 800, fontSize: '1.125rem', color: '#b8ff00', letterSpacing: '-0.01em' }}>
+                <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 800, fontSize: '1.125rem', color: '#4afa7a', letterSpacing: '-0.01em' }}>
                     AURALIS
                 </div>
                 <div style={{ display: 'flex', gap: '2rem' }}>
@@ -505,7 +505,7 @@ function Step({ num, title, children }: { num: number; title: string; children: 
             <div style={{
                 flexShrink: 0,
                 width: 40, height: 40,
-                background: '#b8ff00',
+                background: '#4afa7a',
                 color: '#0c0c0c',
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
                 fontFamily: "'JetBrains Mono', monospace",

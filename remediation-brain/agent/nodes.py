@@ -157,7 +157,16 @@ _PII_PATTERNS: dict[str, re.Pattern[str]] = {
 
 # Paths that definitively indicate deprecated API versions
 _DEPRECATED_PREFIXES = ["/api/v1/", "/api/v0/", "/legacy/", "/old/", "/v1/", "/v0/"]
-_CURRENT_PREFIX      = "/api/v3/"
+
+# Current-version prefixes — configurable via CURRENT_API_PREFIXES env var
+# (comma-separated, e.g. "/api/v3/,/api/v2.5/"). Used as heuristic fallback
+# when GitHub spec is unavailable. Default matches the reference deployment.
+_CURRENT_API_PREFIXES: tuple[str, ...] = tuple(
+    p.strip()
+    for p in os.getenv("CURRENT_API_PREFIXES", "/api/v3/").split(",")
+    if p.strip()
+)
+
 _OPENAPI_SPEC_PATH   = "openapi.yaml"  # path inside GitHub repo
 
 # ── Shannon entropy threshold for detecting encoded PII in long values ─────────
@@ -335,8 +344,13 @@ async def analyze_node(state: IncidentState) -> dict[str, Any]:
 
     # ── Step 1: Fetch spec ─────────────────────────────────────────────────────
     # PyGithub makes synchronous HTTP requests — run in thread pool to avoid
-    # blocking the asyncio event loop.
-    spec       = await asyncio.to_thread(_fetch_openapi_spec)
+    # blocking the asyncio event loop. Capped at 8s so a slow/hung GitHub API
+    # call can't stall the graph indefinitely.
+    try:
+        spec = await asyncio.wait_for(asyncio.to_thread(_fetch_openapi_spec), timeout=8.0)
+    except asyncio.TimeoutError:
+        log.warning("[analyze] spec fetch timed out — using heuristics")
+        spec = None
     spec_paths = _extract_spec_paths(spec) if spec else {}
     used_spec  = bool(spec_paths)
 
@@ -391,7 +405,7 @@ async def analyze_node(state: IncidentState) -> dict[str, Any]:
         # Fallback: path-prefix heuristics when GitHub is unavailable.
         if any(path.startswith(p) for p in _DEPRECATED_PREFIXES):
             classification = "active_zombie"
-        elif path and not path.startswith(_CURRENT_PREFIX):
+        elif path and not any(path.startswith(p) for p in _CURRENT_API_PREFIXES):
             classification = "shadow"
         else:
             classification = "unknown"
@@ -765,8 +779,8 @@ async def report_node(state: IncidentState) -> dict[str, Any]:
     Falls back to heuristic values when GROQ_API_KEY is absent.
     """
     incident_id    = state.get("incident_id", "N/A")
-    classification = state.get("classification")
-    severity       = state.get("severity")
+    classification = state.get("classification") or "unknown"
+    severity       = state.get("severity") or "low"
     pii_list       = state.get("pii_findings", [])
     pii            = ", ".join(pii_list) or "None"
     is_pii         = state.get("is_pii_exposed", False)

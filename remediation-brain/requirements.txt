@@ -38,7 +38,7 @@ python-jose[cryptography]==3.3.0   # JWT encode/decode (auth.py)
 slowapi==0.1.9                     # rate limiting on /sensor/ingest and /remediate
 
 # ── Observability ─────────────────────────────────────────────────────────────
-prometheus-fastapi-instrumentator==0.22.0  # auto-instrument FastAPI → /metrics
+prometheus-fastapi-instrumentator==7.1.0   # auto-instrument FastAPI → /metrics
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
 httpx==0.28.1

@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useEffect, useState, useMemo, useCallback, useRef, Suspense } from "react";
 import dynamic from "next/dynamic";
@@ -326,6 +326,33 @@ function DashboardInner({ initialIncidentId }: { initialIncidentId: string | nul
         }
     }, []);
 
+    // ── Demo seed ─────────────────────────────────────────────────────────────
+    const [demoSeeding, setDemoSeeding] = useState(false);
+    const handleSeedDemo = useCallback(async () => {
+        setDemoSeeding(true);
+        setActionError(null);
+        try {
+            const res = await fetch("/brain/demo/seed", {
+                method: "POST",
+                headers: getBrainHeaders(),
+            });
+            if (!res.ok) {
+                const j = await res.json().catch(() => ({}));
+                throw new Error(j.detail ?? `HTTP ${res.status}`);
+            }
+            if (isMounted.current) {
+                setActionSuccess("Demo incidents seeding — they'll appear in the incident panel as the AI analyzes each endpoint (~30s each).");
+                setTimeout(() => { if (isMounted.current) setActionSuccess(null); }, 12000);
+                setTimeout(() => fetchAll(), 5000);
+            }
+        } catch (err: unknown) {
+            if (isMounted.current)
+                setActionError(err instanceof Error ? err.message : "Demo seed failed");
+        } finally {
+            if (isMounted.current) setDemoSeeding(false);
+        }
+    }, [fetchAll]);
+
     const handleNodeClick      = useCallback((node: GraphNode) => {
         if (node.type === "gateway") return;
         setSelectedEndpoint(prev => prev === node.id ? null : node.id);
@@ -359,7 +386,7 @@ function DashboardInner({ initialIncidentId }: { initialIncidentId: string | nul
                 flexWrap: "nowrap", overflow: "hidden",
             }}>
                 <Link href="/" style={{ textDecoration: "none", flexShrink: 0 }}>
-                    <span style={{ fontFamily: "var(--sans)", fontSize: "16px", fontWeight: 800, color: "#b8ff00", letterSpacing: "-0.01em" }}>AURALIS</span>
+                    <span style={{ fontFamily: "var(--sans)", fontSize: "16px", fontWeight: 800, color: "#4afa7a", letterSpacing: "-0.01em" }}>AURALIS</span>
                 </Link>
                 <span style={{ color: "#2a2a2a", fontSize: "14px" }}>/</span>
                 <span style={{ fontSize: "11px", color: "#555", textTransform: "uppercase", letterSpacing: "0.08em" }}>dashboard</span>
@@ -410,6 +437,16 @@ function DashboardInner({ initialIncidentId }: { initialIncidentId: string | nul
 
                 {/* Extra nav items hidden on mobile via .dash-nav-extra */}
                 <div className="dash-nav-extra" style={{ display: "flex", gap: 8 }}>
+                    <button
+                        onClick={handleSeedDemo}
+                        disabled={demoSeeding}
+                        style={{ background: demoSeeding ? "rgba(74,250,122,0.06)" : "rgba(74,250,122,0.08)", border: "1px solid #4afa7a", color: "#4afa7a", fontFamily: "var(--mono)", fontSize: "11px", padding: "5px 12px", cursor: demoSeeding ? "not-allowed" : "pointer", letterSpacing: "0.06em", opacity: demoSeeding ? 0.7 : 1, transition: "background 0.12s, opacity 0.12s", display: "flex", alignItems: "center", gap: 6 }}
+                        onMouseEnter={e => { if (!demoSeeding) (e.currentTarget as HTMLButtonElement).style.background = "rgba(74,250,122,0.15)"; }}
+                        onMouseLeave={e => { if (!demoSeeding) (e.currentTarget as HTMLButtonElement).style.background = "rgba(74,250,122,0.08)"; }}
+                        title="Seed the dashboard with demo incidents for presentation"
+                    >
+                        {demoSeeding ? <><span className="spinner" style={{ width: 8, height: 8, borderTopColor: "#4afa7a" }} />SEEDING…</> : "◎ LOAD DEMO"}
+                    </button>
                     <Link href="/dashboard/attack-arena" style={{ textDecoration: "none" }}>
                         <button style={{ background: "rgba(255,45,120,0.08)", border: "1px solid #ff2d78", color: "#ff2d78", fontFamily: "var(--mono)", fontSize: "11px", padding: "5px 12px", cursor: "pointer", letterSpacing: "0.06em", transition: "background 0.12s" }}
                             onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,45,120,0.15)"; }}
@@ -485,7 +522,7 @@ function DashboardInner({ initialIncidentId }: { initialIncidentId: string | nul
                 <div style={{ background: "#0a0a0a", borderRight: "1px solid var(--b1)", borderBottom: "1px solid var(--b1)", display: "flex", flexDirection: "column", height: "500px" }}>
                     <div style={{ background: "#0c0c0c", borderBottom: "1px solid #1e1e1e", padding: "10px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0 }}>
                         <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-                            <span style={{ fontFamily: "var(--sans)", fontSize: "10px", fontWeight: 700, color: "#b8ff00", letterSpacing: "0.14em", textTransform: "uppercase" }}>API Dependency Graph</span>
+                            <span style={{ fontFamily: "var(--sans)", fontSize: "10px", fontWeight: 700, color: "#4afa7a", letterSpacing: "0.14em", textTransform: "uppercase" }}>API Dependency Graph</span>
                             <span style={{ fontSize: "10px", color: "#333", border: "1px solid #1e1e1e", padding: "1px 7px", letterSpacing: "0.06em" }}>
                                 {graphNodes.filter(n => n.type === "endpoint").length} endpoints
                             </span>
@@ -495,7 +532,7 @@ function DashboardInner({ initialIncidentId }: { initialIncidentId: string | nul
                         <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
                             {selectedEndpoint && (
                                 <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                                    <span style={{ fontSize: "11px", color: "#b8ff00", fontFamily: "var(--mono)", fontWeight: 700, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={selectedEndpoint}>
+                                    <span style={{ fontSize: "11px", color: "#4afa7a", fontFamily: "var(--mono)", fontWeight: 700, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={selectedEndpoint}>
                                         {selectedEndpoint}
                                     </span>
                                     <button onClick={() => setSelectedEndpoint(null)} style={{ background: "none", border: "none", cursor: "pointer", color: "#333", fontSize: "12px", padding: "1px 4px" }}>✕</button>

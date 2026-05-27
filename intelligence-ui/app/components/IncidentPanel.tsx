@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useState, useCallback } from "react";
 
@@ -98,7 +98,7 @@ function IncidentCard({ incident, onApprove, onReject, loadingId, selectedEndpoi
 
     return (
         <div style={{
-            background: isSelected ? "rgba(107,222,0,0.07)" : "var(--s1)",
+            background: isSelected ? "rgba(74,250,122,0.07)" : "var(--s1)",
             borderLeft: `3px solid ${isSelected ? "var(--accent)" : clsColor}`,
             borderRight: "1px solid var(--b1)",
             borderTop: "1px solid var(--b1)",

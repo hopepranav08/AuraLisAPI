@@ -1,4 +1,4 @@
-'use client';
+﻿'use client';
 import { useState, useEffect, useRef } from 'react';
 import type { ReactNode } from 'react';
 import Link from 'next/link';
@@ -13,7 +13,7 @@ const C = {
   t1:   '#f0f0f0',
   t2:   '#888888',
   t3:   '#444444',
-  lime: '#b8ff00',
+  lime: '#4afa7a',
   pink: '#ff2d78',
   cyan: '#00d4ff',
   purp: '#a855f7',
@@ -294,7 +294,7 @@ export default function LandingPage() {
               textTransform: 'uppercase',
               transition: 'background 0.12s, transform 0.1s',
             }}
-              onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.background = '#ccff1a'; }}
+              onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.background = '#6ffb9a'; }}
               onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.background = C.lime; }}
             >Login →</button>
           </Link>

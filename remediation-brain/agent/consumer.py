@@ -47,8 +47,20 @@ _MAX_DRAIN_SECONDS: float = float(os.getenv("MAX_DRAIN_SECONDS", "30"))
 #
 # drift_alerts are exempt — the PH engine only fires on real anomalies and
 # each alert carries unique alarm context that warrants a separate incident.
-_DEDUP_WINDOW_SECS: float = 60.0
+#
+# Configurable via DEDUP_WINDOW_SECS env var (default: 60).
+# For high-traffic deployments lower this (e.g. 10s); for low-traffic raise it.
+_DEDUP_WINDOW_SECS: float = float(os.getenv("DEDUP_WINDOW_SECS", "60"))
 _recent_paths: dict[str, float] = {}   # path → last_processed epoch seconds
+
+# ── Stream start position for new consumer group creation ─────────────────────
+# CONSUMER_START_ID controls where new (first-ever) consumer groups start:
+#   "$"  — default: only new messages after startup (no replay on fresh start)
+#   "0"  — replay all messages from the beginning of the stream (crash recovery)
+#   "<id>" — replay from a specific stream entry ID (point-in-time recovery)
+# On subsequent restarts the existing group resumes from its last ACK — this
+# env var only affects the very first xgroup_create call per stream.
+_CONSUMER_START_ID: str = os.getenv("CONSUMER_START_ID", "$")
 
 
 def _is_duplicate(payload: dict[str, Any]) -> bool:
@@ -124,19 +136,19 @@ def _should_process(payload: dict[str, Any]) -> bool:
 
 
 async def _ensure_consumer_group(client: aioredis.Redis, stream: str) -> None:
-    """Create the consumer group starting from '$' (new messages only).
+    """Create the consumer group at the position given by CONSUMER_START_ID.
 
-    Using id="$" means a freshly-restarted brain does NOT replay all historical
-    stream events — it only consumes events published after startup.
+    Defaults to "$" (new messages only). Set CONSUMER_START_ID=0 to replay all
+    events from the beginning of the stream (crash recovery), or to a specific
+    stream entry ID for point-in-time recovery.
 
     If the group already exists (BUSYGROUP) we leave it as-is so a gracefully-
     restarted brain resumes from its last acknowledged message.
     """
     try:
-        # id="$" — only new messages after group creation
-        await client.xgroup_create(stream, _GROUP_NAME, id="$", mkstream=True)
-        log.info("consumer group created (fresh start — new messages only)",
-                 stream=stream, group=_GROUP_NAME)
+        await client.xgroup_create(stream, _GROUP_NAME, id=_CONSUMER_START_ID, mkstream=True)
+        log.info("consumer group created",
+                 stream=stream, group=_GROUP_NAME, start_id=_CONSUMER_START_ID)
     except aioredis.ResponseError as exc:
         if "BUSYGROUP" in str(exc):
             log.debug("consumer group already exists — resuming from last ACK",

@@ -15,7 +15,14 @@
 #
 # Phase 5 endpoints:
 #   GET  /honeypot/events              — read recent honeypot hits from Redis stream
-from __future__ import annotations
+# NOTE: 'from __future__ import annotations' intentionally omitted.
+# slowapi's @limiter.limit() wraps route functions via functools.wraps, but the
+# wrapper's __globals__ is the slowapi module — not api.routes. With PEP 563
+# (future annotations), all annotations become ForwardRef strings, and FastAPI
+# resolves them using the wrapper's __globals__ where RemediateRequest etc. are
+# not defined, leaving them as unresolved ForwardRefs treated as query params.
+# Python 3.12 supports dict[str, Any], list[...] etc. natively, so the import
+# is not needed.
 
 import asyncio
 import json
@@ -278,13 +285,19 @@ async def list_incidents(request: Request, limit: int = 50, deduplicate: bool = 
         # Use _iter_states_fast: reads channel_values directly from CheckpointTuple,
         # avoiding one aget_state() DB round-trip per thread (N+1 → O(1) queries).
         async for thread_id, values in _iter_states_fast(graph, limit=limit):
-            # Infer awaiting_approval without aget_state():
-            #   plan ran (planned_actions set) + enforce not yet run (no executed_actions)
-            #   + report not yet generated + routing condition: severity critical/high
-            severity   = (values.get("severity") or "").lower()
-            has_plan   = bool(values.get("planned_actions"))
-            has_report = bool(values.get("report"))
-            is_waiting = has_plan and not has_report and severity in ("critical", "high")
+            severity      = (values.get("severity") or "").lower()
+            has_plan      = bool(values.get("planned_actions"))
+            has_report    = bool(values.get("report"))
+            has_executed  = bool(values.get("executed_actions"))
+            # Authoritative: __interrupt__ channel is set by LangGraph when the
+            # graph pauses at an interrupt() call (i.e. awaiting human approval).
+            has_interrupt = bool(values.get("__interrupt__"))
+            # Fallback heuristic for checkpoints written before __interrupt__ was
+            # captured or by MemorySaver variants that omit that channel.
+            is_waiting = has_interrupt or (
+                has_plan and not has_report and not has_executed
+                and severity in ("critical", "high")
+            )
 
             raw_report = values.get("report")
             report_summary: dict[str, Any] | None = None
@@ -351,7 +364,7 @@ async def get_incident(thread_id: str, request: Request):
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"State fetch failed: {exc}") from exc
 
-    if snapshot is None:
+    if not snapshot or not snapshot.values:
         raise HTTPException(status_code=404, detail=f"Incident '{thread_id}' not found")
 
     values     = snapshot.values or {}
@@ -404,7 +417,7 @@ async def approve_incident(thread_id: str, request: Request, body: ApprovalReque
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    if snapshot is None:
+    if not snapshot or not snapshot.values:
         raise HTTPException(status_code=404, detail=f"Incident '{thread_id}' not found")
 
     if "enforce" not in list(snapshot.next or []):
@@ -461,7 +474,7 @@ async def reject_incident(thread_id: str, request: Request, body: ApprovalReques
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    if snapshot is None:
+    if not snapshot or not snapshot.values:
         raise HTTPException(status_code=404, detail=f"Incident '{thread_id}' not found")
 
     if "enforce" not in list(snapshot.next or []):
@@ -497,6 +510,77 @@ async def reject_incident(thread_id: str, request: Request, body: ApprovalReques
         "thread_id":     thread_id,
         "rejection_note": rejection_note,
         "report_preview": ((snapshot.values or {}).get("report") or {}).get("executive_summary", "")[:300],
+    }
+
+
+# ── Demo seed ─────────────────────────────────────────────────────────────────
+
+_DEMO_EVENTS = [
+    {"method": "GET",  "path": "/api/v1/payments",
+     "reason": "Deprecated v1 payment endpoint with live PII (card, CVV) exposure"},
+    {"method": "GET",  "path": "/api/v1/users",
+     "reason": "Deprecated v1 user endpoint leaking PII (email, SSN)"},
+    {"method": "GET",  "path": "/legacy/export/users",
+     "reason": "Undocumented shadow endpoint exporting bulk user PII"},
+    {"method": "GET",  "path": "/api/v1/admin/config",
+     "reason": "Internal admin config endpoint reachable externally"},
+    {"method": "GET",  "path": "/api/v2/payments",
+     "reason": "v2 payment endpoint with anomalous drift pattern"},
+]
+
+
+@router.post("/demo/seed", tags=["Demo"])
+async def seed_demo_incidents(request: Request, _user: str = Depends(require_auth)):
+    """
+    Seed the dashboard with demo incidents for presentations.
+
+    Triggers real LangGraph remediation workflows for 5 representative endpoints
+    (zombie, shadow, drifting, internal). Each workflow runs asynchronously and
+    the incident appears in the panel as the AI analysis completes (~30s each).
+    Workflows are staggered 4s apart to avoid LLM rate-limit spikes.
+    """
+    graph = getattr(request.app.state, "graph", None)
+    if graph is None:
+        raise HTTPException(status_code=503, detail="Graph not initialized")
+
+    seeded: list[dict[str, str]] = []
+
+    for i, event in enumerate(_DEMO_EVENTS):
+        thread_id = str(uuid.uuid4())
+        config = {"configurable": {"thread_id": thread_id}}
+        initial_state = {
+            "raw_event":            event,
+            "incident_id":          thread_id,
+            "pii_findings":         [],
+            "drift_scores":         [],
+            "planned_actions":      [],
+            "executed_actions":     [],
+            "human_notes":          [],
+            "reasoning_trace":      [],
+            "enforcement_approved": False,
+            "is_pii_exposed":       False,
+            "spec_diff":            None,
+            "github_pr_url":        None,
+            "report":               None,
+            "classification":       None,
+            "severity":             None,
+        }
+
+        async def _run_demo(state=initial_state, cfg=config, path=event["path"], delay=i * 4.0):
+            await asyncio.sleep(delay)
+            try:
+                await graph.ainvoke(state, config=cfg)
+            except Exception as exc:
+                log.warning("demo seed workflow failed", path=path, error=str(exc))
+
+        asyncio.create_task(_run_demo())
+        seeded.append({"thread_id": thread_id, "path": event["path"]})
+
+    return {
+        "status":   "seeding",
+        "count":    len(seeded),
+        "incidents": seeded,
+        "message":  "Demo workflows started. Incidents will appear in /incidents as AI analysis completes (~30s per incident, staggered 4s apart).",
     }
 
 
@@ -777,11 +861,14 @@ async def get_honeypot_events(request: Request, limit: int = 50):
     try:
         async with _get_redis(request) as client:
             raw_entries = await client.xrevrange("auralis:honeypot-events", count=limit)
+        _NOISE_PATHS = frozenset({"/favicon.ico", "/favicon.png", "/robots.txt", "/sitemap.xml"})
         events = []
         for _entry_id, fields in raw_entries:
             if "data" in fields:
                 try:
-                    events.append(json.loads(fields["data"]))
+                    evt = json.loads(fields["data"])
+                    if evt.get("path") not in _NOISE_PATHS:
+                        events.append(evt)
                 except json.JSONDecodeError:
                     pass
         return {"events": events, "total": len(events)}

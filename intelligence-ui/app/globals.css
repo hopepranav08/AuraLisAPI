@@ -1,11 +1,11 @@
-@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Space+Grotesk:wght@400;500;600;700;800&display=swap');
+﻿@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Space+Grotesk:wght@400;500;600;700;800&display=swap');
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 /* ─────────────────────────────────────────────────────────────────────────────
    DARK THEME — BRUTALISM
    Palette: near-black surfaces, off-white ink, sharp 1px borders, zero radius.
-   Accent: electric lime (#b8ff00) pops on dark backgrounds.
+   Accent: cool cyan (#4afa7a) on dark backgrounds.
 ───────────────────────────────────────────────────────────────────────────── */
 :root {
   /* Surfaces — darkest to slightly lifted */
@@ -24,9 +24,9 @@
   --t2:  #888888;       /* secondary — mid grey */
   --t3:  #555555;       /* tertiary — muted (readable on dark) */
 
-  /* Accent — electric lime on dark */
-  --accent:   #b8ff00;              /* lime action colour */
-  --accent-d: rgba(184,255,0,0.08); /* lime tint bg */
+  /* Accent — cool cyan on dark */
+  --accent:   #4afa7a;              /* green action colour */
+  --accent-d: rgba(74,250,122,0.08); /* green tint bg */
 
   /* Status colours — vivid for dark bg readability */
   --red:        #ff3b3b;   --red-bg:    rgba(255,59,59,0.08);
@@ -149,7 +149,7 @@ html, body {
   background: var(--accent-d);
 }
 .btn--accent:hover {
-  background: rgba(107,222,0,0.18);
+  background: rgba(74,250,122,0.18);
   box-shadow: 2px 2px 0 var(--t1);
 }
 
@@ -260,7 +260,7 @@ html, body {
 }
 .data-table td { padding: 8px 12px; border-bottom: 1px solid var(--b1); color: var(--t1); }
 .data-table tr:hover td { background: var(--s2); }
-.data-table tr.row--selected td { background: rgba(184,255,0,0.08); }
+.data-table tr.row--selected td { background: rgba(74,250,122,0.08); }
 .data-table tr.row--danger td   { background: var(--red-bg); }
 .data-table tr.row--warn td     { background: var(--orange-bg); }
 
@@ -492,7 +492,7 @@ html, body {
   font-family: var(--sans);
   font-size: 28px;
   font-weight: 800;
-  color: #b8ff00;
+  color: #4afa7a;
   letter-spacing: -0.02em;
 }
 
@@ -922,13 +922,13 @@ html, body {
 }
 
 @keyframes glitch-2 {
-  0%   { clip-path: inset(97% 0 0% 0);  transform: translate(5px, 2px);  color: #b8ff00; }
+  0%   { clip-path: inset(97% 0 0% 0);  transform: translate(5px, 2px);  color: #4afa7a; }
   15%  { clip-path: inset(65% 0 18% 0); transform: translate(-5px, -2px); }
   28%  { clip-path: inset(38% 0 44% 0); transform: translate(4px, 1px);  color: #00d4ff; }
   45%  { clip-path: inset(14% 0 66% 0); transform: translate(-4px, 0); }
-  62%  { clip-path: inset(8% 0 78% 0);  transform: translate(2px, -1px); color: #b8ff00; }
+  62%  { clip-path: inset(8% 0 78% 0);  transform: translate(2px, -1px); color: #4afa7a; }
   80%  { clip-path: inset(86% 0 5% 0);  transform: translate(-2px, 2px); }
-  100% { clip-path: inset(97% 0 0% 0);  transform: translate(5px, 2px);  color: #b8ff00; }
+  100% { clip-path: inset(97% 0 0% 0);  transform: translate(5px, 2px);  color: #4afa7a; }
 }
 
 @keyframes ticker-scroll {
@@ -948,7 +948,7 @@ html, body {
 
 @keyframes glow-pulse-lime {
   0%, 100% { text-shadow: none; }
-  50%       { text-shadow: 0 0 24px rgba(184,255,0,0.4), 0 0 48px rgba(184,255,0,0.15); }
+  50%       { text-shadow: 0 0 24px rgba(74,250,122,0.4), 0 0 48px rgba(74,250,122,0.15); }
 }
 
 @keyframes float-y {
@@ -994,21 +994,21 @@ html, body {
 .lbtn-lime {
   display: inline-flex; align-items: center; gap: 8px;
   padding: 11px 24px;
-  background: #b8ff00; color: #0c0c0c;
-  border: 2px solid #b8ff00;
+  background: #4afa7a; color: #0c0c0c;
+  border: 2px solid #4afa7a;
   font-family: 'Space Grotesk', sans-serif; font-weight: 800; font-size: 12px;
   text-transform: uppercase; letter-spacing: 0.07em;
   cursor: pointer; text-decoration: none;
-  box-shadow: 4px 4px 0 rgba(184,255,0,0.25);
+  box-shadow: 4px 4px 0 rgba(74,250,122,0.25);
   transition: transform 0.12s, box-shadow 0.12s, background 0.12s;
   white-space: nowrap;
 }
 .lbtn-lime:hover {
-  background: #ccff1a;
-  box-shadow: 6px 6px 0 rgba(184,255,0,0.35);
+  background: #6ffb9a;
+  box-shadow: 6px 6px 0 rgba(74,250,122,0.35);
   transform: translate(-2px, -2px);
 }
-.lbtn-lime:active { transform: translate(0,0); box-shadow: 2px 2px 0 rgba(184,255,0,0.25); }
+.lbtn-lime:active { transform: translate(0,0); box-shadow: 2px 2px 0 rgba(74,250,122,0.25); }
 
 .lbtn-ghost {
   display: inline-flex; align-items: center; gap: 8px;
@@ -1053,8 +1053,8 @@ html, body {
   cursor: default;
 }
 .feat-card:hover {
-  border-color: #b8ff00 !important;
-  box-shadow: 4px 4px 0 #b8ff00;
+  border-color: #4afa7a !important;
+  box-shadow: 4px 4px 0 #4afa7a;
   transform: translate(-2px, -2px);
 }
 
@@ -1096,7 +1096,7 @@ html, body {
   top: 0; left: 0; right: 0;
   height: 3px;
 }
-.stat-card-v2.accent-lime::before   { background: #b8ff00; }
+.stat-card-v2.accent-lime::before   { background: #4afa7a; }
 .stat-card-v2.accent-red::before    { background: var(--red); }
 .stat-card-v2.accent-orange::before { background: var(--orange); }
 .stat-card-v2.accent-blue::before   { background: var(--blue); }

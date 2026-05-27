@@ -292,10 +292,14 @@ async def test_enforce_generates_pr(mocker):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_detect_pii_entropy():
-    """High-entropy base64-like token triggers high_entropy_value finding."""
-    # 32-char high-entropy string simulating a base64-encoded value
-    high_entropy = "aGVsbG8gd29ybGQgdGhpcyBpcyBhIHQ="
-    findings = nodes._detect_pii(f"token={high_entropy}")
+    """High-entropy random token triggers high_entropy_value finding.
+
+    The string must be > 20 chars and have Shannon entropy > 4.5 bits/char.
+    All 32 characters are unique → entropy = log2(32) = 5.0 bits/char.
+    The string contains no split characters (=, &, etc.) so it arrives intact.
+    """
+    high_entropy = "Kj3xR7mQ5nP2tW9bL4vZ0cY8sF1dGe6h"  # 33 unique chars, entropy ≈ 5.0
+    findings = nodes._detect_pii(f"token_value={high_entropy}")
     assert "high_entropy_value" in findings
 
 

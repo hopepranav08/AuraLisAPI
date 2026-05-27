@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import Link from "next/link";
@@ -64,7 +64,7 @@ const SCENARIOS: Scenario[] = [
     },
     {
         id: "full_spectrum", name: "Full Spectrum", subtitle: "All vectors simultaneously",
-        icon: "F", color: "#6bde00", severity: "CRITICAL",
+        icon: "F", color: "#4afa7a", severity: "CRITICAL",
         description: "Combines all attack vectors: zombie burst, data exfil, shadow probe, and credential harvest. Tests complete AuralisAPI detection coverage.",
         targetPath: "/api/v1/legacy-payments",
         requests: [
@@ -89,7 +89,16 @@ function mkD(text: string, kind: DefLine["kind"]): DefLine  { return { id: ++_li
 
 async function safeFetch<T>(url: string, opts?: RequestInit): Promise<T | null> {
     try {
-        const r = await fetch(url, { signal: AbortSignal.timeout(5000), ...opts });
+        const extraHeaders: Record<string, string> = {};
+        if (url.startsWith("/brain")) {
+            const token = typeof window !== "undefined" ? localStorage.getItem("auralis_brain_token") : null;
+            if (token) extraHeaders["Authorization"] = `Bearer ${token}`;
+        }
+        const r = await fetch(url, {
+            signal: AbortSignal.timeout(5000),
+            ...opts,
+            headers: { ...extraHeaders, ...(opts?.headers as Record<string, string> ?? {}) },
+        });
         if (!r.ok) return null;
         return await r.json() as T;
     } catch { return null; }
@@ -130,7 +139,7 @@ function AttackerTerminal({ lines, title }: { lines: TermLine[]; title: string }
 // Defender — light bg with ink text and colored event highlights
 const DEF_COLORS: Record<DefLine["kind"], string> = {
     scan: "var(--blue)", drift: "var(--orange)", alarm: "var(--red)",
-    incident: "var(--red)", action: "var(--green)", done: "#6bde00", sys: "var(--t3)",
+    incident: "var(--red)", action: "var(--green)", done: "#4afa7a", sys: "var(--t3)",
 };
 const DEF_ICONS: Record<DefLine["kind"], string> = {
     scan: "◉", drift: "↑", alarm: "⚠", incident: "⚡", action: "→", done: "✓", sys: "·",
@@ -198,7 +207,7 @@ function ScenarioCard({ s, selected, disabled, onClick }: {
             disabled={disabled}
             style={{
                 width: "100%", textAlign: "left", padding: "12px",
-                background: selected ? "rgba(107,222,0,0.06)" : "var(--s1)",
+                background: selected ? "rgba(74,250,122,0.06)" : "var(--s1)",
                 border: "none",
                 borderLeft: selected ? `3px solid ${s.color}` : "3px solid transparent",
                 borderRadius: 0,
@@ -207,7 +216,7 @@ function ScenarioCard({ s, selected, disabled, onClick }: {
                 outline: "none",
             }}
             onMouseEnter={e => { if (!selected && !disabled) (e.currentTarget as HTMLButtonElement).style.background = "var(--s2)"; }}
-            onMouseLeave={e => { if (!selected && !disabled) (e.currentTarget as HTMLButtonElement).style.background = selected ? "rgba(107,222,0,0.06)" : "var(--s1)"; }}
+            onMouseLeave={e => { if (!selected && !disabled) (e.currentTarget as HTMLButtonElement).style.background = selected ? "rgba(74,250,122,0.06)" : "var(--s1)"; }}
         >
             <div style={{ display: "flex", alignItems: "center", gap: "6px", marginBottom: "4px" }}>
                 <span style={{

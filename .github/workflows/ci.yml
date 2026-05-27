@@ -1,0 +1,154 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+# Cancel in-progress runs when a new push arrives to the same branch.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Job 1: Brain lint (ruff) ───────────────────────────────────────────────
+  brain-lint:
+    name: Brain — ruff lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: remediation-brain
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ruff
+        run: pip install ruff==0.8.6
+
+      - name: Ruff check
+        # E = pycodestyle errors, F = pyflakes; E501 excluded (long lines intentional)
+        run: ruff check --select E,F --ignore E501,E402,F401 .
+
+  # ── Job 2: Brain type-check (mypy) ────────────────────────────────────────
+  brain-typecheck:
+    name: Brain — mypy type-check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: remediation-brain
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: remediation-brain/requirements.txt
+
+      - name: Install runtime deps + mypy
+        run: |
+          pip install --no-cache-dir -r requirements.txt
+          pip install mypy==1.13.0 types-PyYAML
+
+      - name: mypy
+        run: |
+          mypy \
+            --ignore-missing-imports \
+            --no-strict-optional \
+            --allow-untyped-defs \
+            --allow-untyped-globals \
+            --exclude tests \
+            agent/ api/ db/ enforcement/ main.py
+
+  # ── Job 3: Brain integration tests (pytest) ────────────────────────────────
+  brain-test:
+    name: Brain — pytest integration
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: remediation-brain
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            remediation-brain/requirements.txt
+            remediation-brain/requirements-test.txt
+
+      - name: Install all deps
+        run: pip install --no-cache-dir -r requirements.txt -r requirements-test.txt
+
+      - name: Run pytest
+        env:
+          ANTHROPIC_API_KEY: ""   # force heuristic mode — no real LLM calls
+          GITHUB_TOKEN: ""        # force stub mode — no real PR creation
+          SECRET_KEY: "ci-test-secret-key-not-for-production"
+          ADMIN_EMAIL: "admin@auralisapi.dev"
+          ADMIN_PASSWORD: "auralis2025"
+        run: pytest -v --tb=short
+
+  # ── Job 4: UI Next.js build ────────────────────────────────────────────────
+  ui-build:
+    name: UI — Next.js build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: intelligence-ui
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Next.js build
+        env:
+          NEXT_TELEMETRY_DISABLED: "1"
+          # No real backend URLs needed for a static build check.
+          NEXT_PUBLIC_BRAIN_URL: ""
+          NEXT_PUBLIC_SENSOR_URL: ""
+          NEXT_PUBLIC_API_URL: ""
+        run: npm run build
+
+  # ── Job 5: Docker build smoke test ────────────────────────────────────────
+  # Builds both images (builder stage only) to verify Dockerfiles + deps.
+  # Uses GitHub Actions cache so pip/npm layers are reused across runs.
+  docker-smoke:
+    name: Docker — build smoke test
+    runs-on: ubuntu-latest
+    needs: [brain-lint, brain-test, ui-build]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build brain (builder stage — validates pip install)
+        uses: docker/build-push-action@v6
+        with:
+          context: remediation-brain
+          file: remediation-brain/Dockerfile
+          target: builder
+          push: false
+          cache-from: type=gha,scope=brain-builder
+          cache-to: type=gha,mode=max,scope=brain-builder
+
+      - name: Build UI (builder stage — validates npm build)
+        uses: docker/build-push-action@v6
+        with:
+          context: intelligence-ui
+          file: intelligence-ui/Dockerfile
+          target: builder
+          push: false
+          cache-from: type=gha,scope=ui-builder
+          cache-to: type=gha,mode=max,scope=ui-builder
